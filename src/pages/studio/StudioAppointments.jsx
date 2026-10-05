@@ -146,6 +146,7 @@ export default function StudioAppointments() {
           expiry_date: expiry.toISOString().split('T')[0],
           max_uses: 1,
           active: true,
+          is_public: false,
         }).select().single()
 
         if (coupon) {

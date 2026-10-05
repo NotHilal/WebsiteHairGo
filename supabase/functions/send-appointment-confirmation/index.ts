@@ -1,39 +1,100 @@
 // @ts-nocheck
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
 const CORS = {
   'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    headers: { ...CORS, 'Content-Type': 'application/json' }, status,
+  })
+}
+
+const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, ch => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+))
+
+// Sends one confirmation email for a freshly created booking. The recipient
+// and every detail come from the appointment row itself, so this can't be
+// used to send arbitrary emails.
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
 
-  // Require an Authorization header (user JWT for logged-in users, anon key for guests).
-  // This blocks calls from outside the Supabase client entirely.
+  // User JWT for logged-in customers, anon key for guests
   const authHeader = req.headers.get('Authorization')
-  if (!authHeader) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-      headers: { ...CORS, 'Content-Type': 'application/json' }, status: 401,
-    })
-  }
+  if (!authHeader) return json({ error: 'Unauthorized' }, 401)
 
   const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
-  if (!RESEND_API_KEY) {
-    return new Response(JSON.stringify({ error: 'RESEND_API_KEY not set' }), {
-      headers: { ...CORS, 'Content-Type': 'application/json' }, status: 500,
-    })
-  }
+  if (!RESEND_API_KEY) return json({ error: 'RESEND_API_KEY not set' }, 500)
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+  let claimedId = null
 
   try {
-    const { to, name, service, stylist, date, time, price, paymentStatus } = await req.json()
-
-    if (!to || !name || !service) {
-      return new Response(JSON.stringify({ error: 'Missing required fields' }), {
-        headers: { ...CORS, 'Content-Type': 'application/json' }, status: 400,
-      })
+    const { appointmentId } = await req.json()
+    if (typeof appointmentId !== 'string' || !/^[0-9a-f-]{36}$/i.test(appointmentId)) {
+      return json({ error: 'appointmentId required' }, 400)
     }
 
+    const { data: appt } = await admin.from('appointments')
+      .select('id, user_id, date, time, notes, payment_status, payment_intent_id, guest_name, guest_email, created_at, confirmation_sent_at, services(name, price), stylists(name), profiles(full_name, email)')
+      .eq('id', appointmentId).maybeSingle()
+    if (!appt) return json({ error: 'Appointment not found' }, 404)
+
+    // A customer's booking can only be confirmed by that customer
+    if (appt.user_id) {
+      const userClient = createClient(
+        Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!,
+        { global: { headers: { Authorization: authHeader } } }
+      )
+      const { data: { user } } = await userClient.auth.getUser()
+      if (user?.id !== appt.user_id) return json({ error: 'Forbidden' }, 403)
+    }
+
+    if (Date.now() - new Date(appt.created_at).getTime() > 30 * 60 * 1000) {
+      return json({ error: 'Too late to send a confirmation for this booking' }, 400)
+    }
+
+    // Claim the send so the same booking can't trigger repeat emails
+    const { data: claimed } = await admin.from('appointments')
+      .update({ confirmation_sent_at: new Date().toISOString() })
+      .eq('id', appt.id).is('confirmation_sent_at', null).select('id')
+    if (!claimed?.length) return json({ ok: true, alreadySent: true })
+    claimedId = appt.id
+
+    const to = appt.user_id ? appt.profiles?.email : appt.guest_email
+    if (!to) throw new Error('No email address on this booking')
+
+    const paymentStatus = appt.payment_status
     const isInStore = paymentStatus === 'pay_in_store'
-    const subject = `Confirmed: ${service} on ${date} at ${time} — HairGo`
+
+    let priceNum = parseFloat(appt.services?.price ?? 0)
+    if (appt.payment_status === 'paid' && appt.payment_intent_id && Deno.env.get('STRIPE_SECRET_KEY')) {
+      const res = await fetch(`https://api.stripe.com/v1/payment_intents/${encodeURIComponent(appt.payment_intent_id)}`, {
+        headers: { Authorization: `Bearer ${Deno.env.get('STRIPE_SECRET_KEY')}` },
+      })
+      if (res.ok) priceNum = (await res.json()).amount_received / 100
+    } else {
+      const m = /Final: \$(\d+(?:\.\d{1,2})?)\]/.exec(appt.notes ?? '')
+      if (m) priceNum = Math.min(priceNum, parseFloat(m[1]))
+    }
+
+    const rawService = appt.services?.name ?? 'Appointment'
+    const rawDate = new Date(`${appt.date}T00:00:00Z`).toLocaleDateString('en-NZ', {
+      weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+    })
+    const rawTime = String(appt.time).slice(0, 5)
+
+    const name    = escapeHtml(appt.user_id ? (appt.profiles?.full_name || 'there') : (appt.guest_name || 'there'))
+    const service = escapeHtml(rawService)
+    const stylist = escapeHtml(appt.stylists?.name ?? '')
+    const date    = escapeHtml(rawDate)
+    const time    = escapeHtml(rawTime)
+    const price   = escapeHtml(priceNum.toFixed(2))
+
+    const subject = `Confirmed: ${rawService} on ${rawDate} at ${rawTime} — HairGo`
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -202,13 +263,11 @@ Deno.serve(async (req) => {
       throw new Error(`Resend error ${res.status}: ${body}`)
     }
 
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { ...CORS, 'Content-Type': 'application/json' }, status: 200,
-    })
+    return json({ ok: true })
   } catch (err) {
     console.error('send-appointment-confirmation error:', err.message)
-    return new Response(JSON.stringify({ error: err.message }), {
-      headers: { ...CORS, 'Content-Type': 'application/json' }, status: 400,
-    })
+    // Let a retry send it if this attempt failed
+    if (claimedId) await admin.from('appointments').update({ confirmation_sent_at: null }).eq('id', claimedId)
+    return json({ error: 'Could not send confirmation email' }, 400)
   }
 })

@@ -218,12 +218,8 @@ export default function Profile() {
     setValidatingCartCode(true)
     setCartCouponError(null)
     try {
-      const { data: coupon } = await supabase
-        .from('coupons')
-        .select('*')
-        .eq('code', code)
-        .eq('active', true)
-        .maybeSingle()
+      const { data: found } = await supabase.rpc('lookup_coupon', { p_code: code })
+      const coupon = found?.[0]
       if (!coupon) { setCartCouponError('Invalid coupon code'); return }
       if (coupon.discount_type === 'percentage') { setCartCouponError('Percentage coupons can only be applied to appointments'); return }
       if (coupon.expiry_date && new Date(coupon.expiry_date) < new Date()) { setCartCouponError('This coupon has expired'); return }
@@ -259,19 +255,11 @@ export default function Profile() {
     if (cartItems.length === 0) return
     setReserving(true)
     try {
-      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-      const orderGroupId = crypto.randomUUID()
-      for (const item of cartItems) {
-        await supabase.from('preorders').insert({
-          user_id: user.id, product_id: item.product_id, quantity: item.quantity,
-          status: 'active', payment_status: 'pay_in_store', expires_at: expiresAt,
-          order_group_id: orderGroupId,
-        })
-        await supabase.rpc('decrement_product_stock', {
-          p_product_id: item.product_id,
-          p_quantity: item.quantity,
-        })
-      }
+      // The server checks stock, creates the reservation and empties the cart
+      const { data, error } = await supabase.functions.invoke('create-payment-intent', {
+        body: { type: 'reserve-cart' },
+      })
+      if (error || !data?.ok) throw new Error(data?.error)
       await clearCart()
       setCartCoupon(null); setCartCouponCode('')
       const itemSummary = cartItems.map(i => `${i.quantity}× ${i.products?.name || 'item'}`).join(', ')
@@ -281,8 +269,8 @@ export default function Profile() {
       toast.success('Items reserved! Come pay in store within 7 days.')
       loadAll()
       setTab('Orders')
-    } catch {
-      toast.error('Could not reserve items — please try again')
+    } catch (err) {
+      toast.error(err.message || 'Could not reserve items — please try again')
     } finally {
       setReserving(false)
     }
@@ -290,28 +278,11 @@ export default function Profile() {
 
   async function completeCartPayment(paymentIntentId) {
     try {
-      const orderGroupId = crypto.randomUUID()
-      for (const item of cartItems) {
-        await supabase.from('preorders').insert({
-          user_id: user.id, product_id: item.product_id, quantity: item.quantity,
-          status: 'active', payment_intent_id: paymentIntentId, payment_status: 'paid',
-          order_group_id: orderGroupId,
-          ...(cartCoupon ? { coupon_code: cartCoupon.code, discount_amount: parseFloat(cartCoupon.discount_value) } : {}),
-        })
-        await supabase.rpc('decrement_product_stock', {
-          p_product_id: item.product_id,
-          p_quantity: item.quantity,
-        })
-      }
-
-      // Mark coupon used only now — payment is confirmed
-      if (cartCoupon) {
-        try {
-          await supabase.functions.invoke('create-payment-intent', {
-            body: { type: 'confirm-coupon', paymentIntentId, couponCode: cartCoupon.code },
-          })
-        } catch {} // non-critical — order is already confirmed
-      }
+      // The server creates the order from the verified Stripe payment
+      const { data, error } = await supabase.functions.invoke('create-payment-intent', {
+        body: { type: 'finalize', paymentIntentId },
+      })
+      if (error || !data?.ok) throw new Error(data?.error)
 
       await clearCart()
       setCartCoupon(null); setCartCouponCode('')

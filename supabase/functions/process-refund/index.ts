@@ -21,13 +21,36 @@ Deno.serve(async (req) => {
   const authHeader = req.headers.get('Authorization')
   if (!authHeader) return json({ error: 'Unauthorized' }, 401)
 
+  const userClient = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+    { global: { headers: { Authorization: authHeader } } }
+  )
+  const { data: { user } } = await userClient.auth.getUser()
+  if (!user) return json({ error: 'Unauthorized' }, 401)
+
   const adminClient = createClient(
     Deno.env.get('SUPABASE_URL')!,
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   )
 
+  // Admins and managers can cancel/refund anything; artists only appointments
+  // with their own linked stylist profile.
+  const { data: caller } = await adminClient.from('profiles').select('role').eq('id', user.id).single()
+  const role = caller?.role
+  if (role !== 'admin' && role !== 'manager' && role !== 'artist') return json({ error: 'Forbidden' }, 403)
+
   try {
-    const { type, id, refundPct = 100 } = await req.json()
+    const { type, id, refundPct: rawPct = 100 } = await req.json()
+    const refundPct = Math.min(100, Math.max(0, Number(rawPct) || 0))
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id)) return json({ error: 'Invalid id' }, 400)
+
+    if (role === 'artist') {
+      if (type === 'order') return json({ error: 'Forbidden' }, 403)
+      const { data: appt } = await adminClient.from('appointments')
+        .select('stylists(profile_id)').eq('id', id).maybeSingle()
+      if ((appt as any)?.stylists?.profile_id !== user.id) return json({ error: 'Forbidden' }, 403)
+    }
 
     if (type === 'cancel-with-credit') {
       // Cancel appointment and issue a store-credit coupon for 100% of what was paid.
@@ -61,6 +84,7 @@ Deno.serve(async (req) => {
           active: true,
           max_uses: 1,
           current_uses: 0,
+          is_public: false,
           expiry_date: expiry.toISOString().split('T')[0],
         }).select('id').single()
 

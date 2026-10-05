@@ -48,8 +48,6 @@ export function AuthProvider({ children }) {
         full_name: fullName,
         phone: phone || null,
         email,
-        role: 'user',
-        points: 0,
       }, { onConflict: 'id' })
       if (profileError) console.error('Profile upsert failed:', profileError.message)
     }

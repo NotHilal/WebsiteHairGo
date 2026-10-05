@@ -225,7 +225,7 @@ export default function StudioAppointmentsList() {
         const { data: coupon } = await supabase.from('coupons').insert({
           code, discount_type: 'percentage', discount_value: 30,
           min_points_required: 0, expiry_date: expiry.toISOString().split('T')[0],
-          max_uses: 1, active: true,
+          max_uses: 1, active: true, is_public: false,
         }).select().single()
         if (coupon) {
           await supabase.from('user_coupons').insert({ user_id: appt.user_id, coupon_id: coupon.id, used: false })

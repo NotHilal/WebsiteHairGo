@@ -227,21 +227,12 @@ export default function Appointments() {
     }
   }
 
-  async function sendConfirmationEmail(paymentStatus, paymentIntentId) {
+  async function sendConfirmationEmail(appointmentId) {
+    if (!appointmentId) return
     try {
-      const email = user ? user.email : guestInfo.email
-      const name  = user ? (profile?.full_name || 'Guest') : guestInfo.name
+      // The server looks up the booking and its email address itself
       await supabase.functions.invoke('send-appointment-confirmation', {
-        body: {
-          to: email, name,
-          service: sel.service.name,
-          stylist: sel.stylist.name,
-          date: format(sel.date, 'EEEE, MMMM d, yyyy'),
-          time: sel.time,
-          price: finalPrice.toFixed(2),
-          paymentStatus,
-          ...(paymentIntentId ? { paymentIntentId } : {}),
-        },
+        body: { appointmentId },
       })
     } catch (err) {
       toast.error('Email error: ' + (err?.message || JSON.stringify(err)))
@@ -254,7 +245,8 @@ export default function Appointments() {
     setValidatingCode(true)
     setCouponError(null)
     try {
-      const { data: coupon } = await supabase.from('coupons').select('*').eq('code', code).eq('active', true).maybeSingle()
+      const { data: found } = await supabase.rpc('lookup_coupon', { p_code: code })
+      const coupon = found?.[0]
       if (!coupon) { setCouponError('Invalid coupon code'); return }
       if (coupon.expiry_date && new Date(coupon.expiry_date) < new Date()) { setCouponError('This coupon has expired'); return }
       if (coupon.max_uses != null && coupon.current_uses >= coupon.max_uses) { setCouponError('This coupon has been fully redeemed'); return }
@@ -262,18 +254,12 @@ export default function Appointments() {
       if (user) {
         // For logged-in users: get or create a user_coupons row so the code is
         // treated identically to an admin-assigned card from this point on.
-        let { data: uc } = await supabase.from('user_coupons')
+        const { data: ucId, error: claimErr } = await supabase.rpc('claim_promo_coupon', { p_code: code })
+        if (claimErr) { setCouponError(claimErr.message || 'Could not apply coupon — please try again'); return }
+        const { data: uc, error: ucErr } = await supabase.from('user_coupons')
           .select('id, used, coupons(id, code, discount_type, discount_value, expiry_date, active)')
-          .eq('user_id', user.id).eq('coupon_id', coupon.id).maybeSingle()
-
-        if (!uc) {
-          const { data: inserted, error: insErr } = await supabase.from('user_coupons')
-            .insert({ user_id: user.id, coupon_id: coupon.id, used: false, granted_by: 'promo' })
-            .select('id, used, coupons(id, code, discount_type, discount_value, expiry_date, active)')
-            .single()
-          if (insErr) { setCouponError('Could not apply coupon — please try again'); return }
-          uc = inserted
-        }
+          .eq('id', ucId).single()
+        if (ucErr || !uc) { setCouponError('Could not apply coupon — please try again'); return }
 
         if (uc.used) { setCouponError('You have already used this coupon'); return }
 
@@ -299,6 +285,10 @@ export default function Appointments() {
         body: {
           type: 'appointment',
           serviceId: sel.service.id,
+          stylistId: sel.stylist.id,
+          date: format(sel.date, 'yyyy-MM-dd'),
+          time: sel.time,
+          notes: sel.notes,
           couponId: (!appliedCoupon?.isManual && appliedCoupon?.id) ? appliedCoupon.id : null,
           couponCode: appliedCoupon?.isManual ? appliedCoupon.coupons.code : null,
           label: `${sel.service.name} with ${sel.stylist.name} — ${format(sel.date, 'MMM d')} at ${sel.time}`,
@@ -316,41 +306,24 @@ export default function Appointments() {
   async function completeBooking(paymentIntentId) {
     setSaving(true)
     try {
-      const couponNote = appliedCoupon
-        ? `[Coupon: ${appliedCoupon.coupons.code} — ${appliedCoupon.coupons.discount_type === 'percentage' ? `${appliedCoupon.coupons.discount_value}% off` : `$${appliedCoupon.coupons.discount_value} off`} · Final: $${finalPrice.toFixed(2)}]`
-        : ''
-      const row = {
-        stylist_id: sel.stylist.id, service_id: sel.service.id,
-        date: format(sel.date, 'yyyy-MM-dd'), time: sel.time,
-        notes: [sel.notes, couponNote].filter(Boolean).join('\n'),
-        status: 'confirmed', payment_intent_id: paymentIntentId, payment_status: 'paid',
-      }
-      if (user) row.user_id = user.id
-      else { row.guest_name = guestInfo.name; row.guest_phone = guestInfo.phone; row.guest_email = guestInfo.email }
-      const { error } = await supabase.from('appointments').insert(row)
+      // The server creates the booking from the verified Stripe payment
+      const { data, error } = await supabase.functions.invoke('create-payment-intent', {
+        body: { type: 'finalize', paymentIntentId },
+      })
       if (error) throw error
-
-      // Mark coupon used only now — payment is confirmed
-      if (appliedCoupon) {
-        try {
-          await supabase.functions.invoke('create-payment-intent', {
-            body: {
-              type: 'confirm-coupon',
-              paymentIntentId,
-              couponId: !appliedCoupon.isManual ? appliedCoupon.id : null,
-              couponCode: appliedCoupon.isManual ? appliedCoupon.coupons.code : null,
-            },
-          })
-        } catch {} // non-critical — booking is already confirmed
+      if (!data?.ok) {
+        toast.error(data?.error || 'Payment succeeded but booking failed — please contact us', { duration: 8000 })
+        setPayStep(null); setClientSecret(null)
+        return
       }
 
       await Promise.all([
-        sendConfirmationEmail('paid', paymentIntentId),
+        sendConfirmationEmail(data.appointmentId),
         logBooking('paid'),
       ])
       if (user) sessionStorage.removeItem(`hg_booking_coupon_${user.id}`)
       setDone(true)
-    } catch (err) {
+    } catch {
       toast.error('Payment succeeded but booking failed — please contact us')
     } finally {
       setSaving(false)
@@ -369,10 +342,13 @@ export default function Appointments() {
         date: format(sel.date, 'yyyy-MM-dd'), time: sel.time,
         notes: [sel.notes, couponNote].filter(Boolean).join('\n'),
         status: 'confirmed', payment_status: 'pay_in_store',
+        // Generated here so guests (who can't read rows back) can still get an email
+        id: crypto.randomUUID(),
       }
       if (user) row.user_id = user.id
       else { row.guest_name = guestInfo.name; row.guest_phone = guestInfo.phone; row.guest_email = guestInfo.email }
       const { error } = await supabase.from('appointments').insert(row)
+      if (error?.code === '23505') throw new Error('That time slot was just taken — please pick another time')
       if (error) throw error
       if (appliedCoupon && !appliedCoupon.isManual) {
         await supabase.functions.invoke('create-payment-intent', {
@@ -380,7 +356,7 @@ export default function Appointments() {
         })
       }
       await Promise.all([
-        sendConfirmationEmail('pay_in_store'),
+        sendConfirmationEmail(row.id),
         logBooking('pay_in_store'),
       ])
       if (user) sessionStorage.removeItem(`hg_booking_coupon_${user.id}`)
