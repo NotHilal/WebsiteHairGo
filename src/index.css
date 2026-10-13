@@ -64,6 +64,14 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; overflow-x: hidden; }
 
+/* Large screens: sizes across the site are fixed pixels designed for ~1440px,
+   so scale the whole page up rather than leaving small text in a narrow column. */
+@media (min-width: 1680px) { html { zoom: 1.12; } }
+@media (min-width: 1880px) { html { zoom: 1.25; } }
+@media (min-width: 2200px) { html { zoom: 1.4; } }
+@media (min-width: 2500px) { html { zoom: 1.6; } }
+@media (min-width: 3200px) { html { zoom: 2; } }
+
 body {
   background-color: var(--col-bg);
   color: var(--col-text);

@@ -1,6 +1,8 @@
 ﻿import { useState, useEffect } from 'react'
 import { Calendar, ShoppingBag, UserCheck, MessageSquare, Clock, LayoutDashboard } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { apptFinalPrice } from '../../lib/price'
+import { slotsForDay } from '../../lib/hours'
 import { getOrFetch } from '../../lib/cache'
 import { format, getHours, startOfMonth, endOfMonth } from 'date-fns'
 import { useNavigate } from 'react-router-dom'
@@ -20,7 +22,7 @@ const STATUS = {
   completed: { color: 'var(--col-acc)', bg: 'rgba(var(--rgb-acc),0.12)',  border: 'rgba(var(--rgb-acc),0.22)' },
 }
 
-const SLOTS = ['09:00','10:00','11:00','12:00','14:00','15:00','16:00','17:00','18:00']
+
 
 function greeting() {
   const h = getHours(new Date())
@@ -54,10 +56,12 @@ export default function StudioDashboard() {
         supabase.from('appointments').select('*', { count: 'exact', head: true }).gte('date', format(startOfMonth(new Date()), 'yyyy-MM-dd')).lte('date', format(endOfMonth(new Date()), 'yyyy-MM-dd')),
         supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('status', 'pending').gte('date', format(startOfMonth(new Date()), 'yyyy-MM-dd')).lte('date', format(endOfMonth(new Date()), 'yyyy-MM-dd')),
         supabase.from('preorders').select('*', { count: 'exact', head: true }).eq('status', 'active'),
-        supabase.from('messages').select('*', { count: 'exact', head: true }).eq('read', false),
+        // Unread client messages in the tickets this user can see
+        supabase.from('ticket_messages').select('*', { count: 'exact', head: true }).eq('is_from_admin', false).eq('read', false),
         supabase.from('appointments')
           .select('*, profiles(full_name), services(name, price, duration), stylists(name, photo_url)')
           .eq('date', today)
+          .neq('status', 'cancelled')
           .order('time'),
         supabase.from('stylists').select('id, name, photo_url').order('display_order'),
       ])
@@ -79,7 +83,7 @@ export default function StudioDashboard() {
 
     if (!isAdmin && !isManager && user) {
       const { data: linked } = await supabase
-        .from('stylists').select('id').eq('profile_id', user.id).single()
+        .from('stylists').select('id').eq('profile_id', user.id).maybeSingle()
       if (linked) {
         const { data: open } = await supabase
           .from('timesheets').select('id, clock_in')
@@ -100,6 +104,7 @@ export default function StudioDashboard() {
     { icon: MessageSquare, label: 'Messages',     value: stats.msgs,         sub: 'Unread',                   link: '/studio/messages',  color: '#60a5fa' },
   ]
 
+  const SLOTS        = slotsForDay(new Date())
   const visibleAppts = stylistFilter ? todayAppts.filter(a => a.stylist_id === stylistFilter) : todayAppts
   const bookedCount  = visibleAppts.length
   const freeCount    = SLOTS.length - new Set(visibleAppts.map(a => a.time?.slice(0, 5))).size
@@ -321,7 +326,7 @@ export default function StudioDashboard() {
                                 {[appt.services?.name, appt.profiles?.full_name].filter(Boolean).join(' · ')}
                               </p>
                             </div>
-                            {appt.services?.price && <span style={{ fontSize: '0.84rem', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>${appt.services.price}</span>}
+                            {appt.services?.price && <span style={{ fontSize: '0.84rem', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>${apptFinalPrice(appt).toFixed(2)}</span>}
                             {appt.payment_status === 'pay_in_store' && (
                               <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 5, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.3)', color: '#f59e0b', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, flexShrink: 0 }}>
                                 Pay in store
@@ -360,7 +365,7 @@ export default function StudioDashboard() {
                                   </p>
                                 </div>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                                  {appt.services?.price && <span style={{ fontSize: '0.8rem', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>${appt.services.price}</span>}
+                                  {appt.services?.price && <span style={{ fontSize: '0.8rem', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>${apptFinalPrice(appt).toFixed(2)}</span>}
                                   {appt.payment_status === 'pay_in_store' && (
                                     <span style={{ fontSize: 12, padding: '2px 7px', borderRadius: 5, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.3)', color: '#f59e0b', fontFamily: 'DM Sans,sans-serif', fontWeight: 700 }}>
                                       In store

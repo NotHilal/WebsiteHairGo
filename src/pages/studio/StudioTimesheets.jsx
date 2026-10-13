@@ -4,6 +4,7 @@ import { supabase } from '../../lib/supabase'
 import Pager from '../../lib/Pager'
 import { useAuth } from '../../contexts/AuthContext'
 import { useLogAction } from '../../hooks/useLogAction'
+import { sheetMins } from '../../lib/pay'
 import { format, startOfWeek, endOfWeek, addWeeks, subWeeks, differenceInMinutes, isToday, startOfMonth, addDays, isSameMonth, addMonths, subMonths, isSameWeek } from 'date-fns'
 import toast from 'react-hot-toast'
 
@@ -40,7 +41,7 @@ export default function StudioTimesheets() {
   const [filterStylist,  setFilterStylist]  = useState(null)
   const [showFilter,     setShowFilter]     = useState(false)
   const [liveClockIns,   setLiveClockIns]   = useState([])
-  const [tick,           setTick]           = useState(0)
+  const [,               setTick]           = useState(0)  // re-render every minute for live timers
   const [confirmClockOut, setConfirmClockOut] = useState(null) // stylistId to clock out
 
   const weekStart = startOfWeek(week, { weekStartsOn: 1 })
@@ -129,9 +130,10 @@ export default function StudioTimesheets() {
     setLoading(false)
   }
 
+  // The server stamps the time, so clock-ins can't be back- or forward-dated
   async function clockIn(stylistId) {
-    const { error } = await supabase.from('timesheets').insert({ stylist_id: stylistId, clock_in: new Date().toISOString() })
-    if (error) { toast.error('Could not clock in'); return }
+    const { error } = await supabase.rpc('clock_in', { p_stylist_id: stylistId })
+    if (error) { toast.error(error.message === 'Already clocked in' ? 'Already clocked in' : 'Could not clock in'); load(); return }
     toast.success('Clocked in!')
     const stylistName = stylists.find(s => s.id === stylistId)?.name || 'Unknown'
     log('timesheet.clock_in', { entityType: 'timesheet', entityId: stylistId, details: { message: `clocked in (${stylistName})` } })
@@ -147,10 +149,7 @@ export default function StudioTimesheets() {
     setLiveClockIns(prev => prev.filter(e => e.stylist_id !== stylistId))
     setConfirmClockOut(null)
 
-    const { error } = await supabase.from('timesheets')
-      .update({ clock_out: now })
-      .eq('stylist_id', stylistId)
-      .is('clock_out', null)
+    const { error } = await supabase.rpc('clock_out', { p_stylist_id: stylistId })
     if (error) { toast.error('Could not clock out'); load(); return }
     toast.success('Clocked out!')
     const stylistName = stylists.find(s => s.id === stylistId)?.name || 'Unknown'
@@ -159,12 +158,7 @@ export default function StudioTimesheets() {
   }
 
   const todayEntries  = entries.filter(e => isToday(new Date(e.clock_in)))
-  const clockedInNow  = todayEntries.filter(e => !e.clock_out)
-  const totalWeekMins = entries.reduce((acc, e) => {
-    if (!e.clock_out) return acc
-    const raw = Math.max(0, differenceInMinutes(new Date(e.clock_out), new Date(e.clock_in)))
-    return acc + (raw >= 360 ? raw - 30 : raw)
-  }, 0)
+  const totalWeekMins = entries.reduce((acc, e) => acc + sheetMins(e), 0)
 
   const filtered = filterStylist ? entries.filter(e => e.stylist_id === filterStylist.id) : entries
   const PER_PAGE = 5
@@ -446,7 +440,7 @@ export default function StudioTimesheets() {
               : activeEntry
             const todayMins = todayEntries
               .filter(e => e.stylist_id === s.id && e.clock_out)
-              .reduce((acc, e) => acc + Math.max(0, differenceInMinutes(new Date(e.clock_out), new Date(e.clock_in)) - (e.break_minutes || 0)), 0)
+              .reduce((acc, e) => acc + sheetMins(e), 0)
             const sinceMin  = active ? differenceInMinutes(new Date(), new Date(active.clock_in)) : 0
 
             return (
@@ -515,7 +509,7 @@ export default function StudioTimesheets() {
           </div>
         ) : paged.map(e => {
           const raw      = e.clock_out ? Math.max(0, differenceInMinutes(new Date(e.clock_out), new Date(e.clock_in))) : null
-          const net      = raw !== null ? (raw >= 360 ? raw - 30 : raw) : null
+          const net      = raw !== null ? sheetMins(e) : null
           const isActive = !e.clock_out
           return (
             <div key={e.id} className="ts-row"

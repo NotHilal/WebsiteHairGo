@@ -1,6 +1,7 @@
 ﻿import { Link } from 'react-router-dom'
 import { MapPin, Phone, Mail, ArrowUpRight, ChevronRight } from 'lucide-react'
 import hairgoLogo from '../../assets/hairgo.png'
+import { HOURS_LABELS } from '../../lib/hours'
 
 const NAV_LINKS = [
   { to: '/',             label: 'Home' },
@@ -16,10 +17,7 @@ const CONTACT = [
   { icon: Mail,   text: 'hello@hairgo.co.nz' },
 ]
 
-const HOURS = [
-  { day: 'Mon – Fri', time: '9:00 – 21:00', open: true  },
-  { day: 'Sat – Sun', time: '10:00 – 21:00', open: true  },
-]
+const HOURS = HOURS_LABELS.map(h => ({ ...h, open: true }))
 
 export default function Footer() {
   const year = new Date().getFullYear()

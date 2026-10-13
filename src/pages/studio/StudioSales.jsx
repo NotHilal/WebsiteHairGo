@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import { ChevronLeft, ChevronRight, TrendingUp, Scissors, Package, Search } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import Pager from '../../lib/Pager'
+import { apptFinalPrice, linePrice } from '../../lib/price'
+import { fetchAll } from '../../lib/fetchAll'
 import {
   format, addDays, subDays, addWeeks, subWeeks, addMonths, subMonths,
   isToday, isSameWeek, isSameMonth, parseISO,
@@ -34,7 +36,34 @@ const STATUS_ORDER = {
 const card  = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 14 }
 const TABS  = ['Appointments', 'Product Orders']
 const MODES = ['Day', 'Week', 'Month', 'Yearly']
-const HOURS = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+const HOURS = [9, 10, 11, 12, 13, 14, 15, 16, 17]
+
+// Money that counts as taken: paid online (not refunded, credited or moved to
+// a rescheduled booking), or paid at the salon once the visit/pickup happened
+const apptCounts  = a => a.payment_status === 'paid' || (a.payment_status === 'pay_in_store' && a.status === 'completed')
+const orderCounts = p => p.payment_status === 'paid' || (p.payment_status === 'pay_in_store' && p.status === 'retrieved')
+const localDay    = ts => format(new Date(ts), 'yyyy-MM-dd')
+
+// Adds _day (local booking day) and _revenue (what was actually charged) to each row
+function withRevenue(appts, orders) {
+  // A store discount applies once per order. Older orders repeated it on every
+  // line, so keep only the first line's discount in each order.
+  const discountOn = new Map()
+  const seen = new Set()
+  for (const p of orders) {
+    const key = p.order_group_id ?? p.payment_intent_id ?? p.id
+    const d = parseFloat(p.discount_amount) || 0
+    if (d > 0 && !seen.has(key)) { seen.add(key); discountOn.set(p.id, d) }
+  }
+  return {
+    appts: appts.map(a => ({ ...a, _day: localDay(a.created_at), _revenue: apptCounts(a) ? apptFinalPrice(a) : 0 })),
+    orders: orders.map(p => ({
+      ...p,
+      _day: localDay(p.created_at),
+      _revenue: orderCounts(p) ? Math.max(0, linePrice(p) * (p.quantity || 1) - (discountOn.get(p.id) || 0)) : 0,
+    })),
+  }
+}
 
 /* ── compute period boundaries ── */
 function getPeriod(anchor, mode) {
@@ -106,22 +135,27 @@ export default function StudioSales() {
 
   async function load() {
     setLoading(true)
-    let apptQ  = supabase.from('appointments').select('*, profiles(full_name, phone), services(name, price, duration), stylists(name)').order('created_at', { ascending: false })
-    let orderQ = supabase.from('preorders').select('*, products(name, price, image_url), profiles(full_name, phone)').order('created_at', { ascending: false })
-    if (startISO && endISO) {
-      apptQ  = apptQ.gte('created_at', startISO).lt('created_at', endISO)
-      orderQ = orderQ.gte('created_at', startISO).lt('created_at', endISO)
+    const apptQ  = () => {
+      let q = supabase.from('appointments').select('*, profiles(full_name, phone), services(name, price, duration), stylists(name)').order('created_at', { ascending: false }).order('id')
+      if (startISO && endISO) q = q.gte('created_at', startISO).lt('created_at', endISO)
+      return q
     }
-    const [{ data: appts }, { data: orders }] = await Promise.all([apptQ, orderQ])
-    setAppointments(appts  || [])
-    setPreorders(orders    || [])
+    const orderQ = () => {
+      let q = supabase.from('preorders').select('*, products(name, price, image_url), profiles(full_name, phone)').order('created_at', { ascending: false }).order('id')
+      if (startISO && endISO) q = q.gte('created_at', startISO).lt('created_at', endISO)
+      return q
+    }
+    const [{ data: appts }, { data: orders }] = await Promise.all([fetchAll(apptQ), fetchAll(orderQ)])
+    const rows = withRevenue(appts, orders)
+    setAppointments(rows.appts)
+    setPreorders(rows.orders)
     setLoading(false)
   }
 
-  const paidAppts       = appointments.filter(a => a.payment_status === 'paid' || (a.payment_status === 'pay_in_store' && a.status === 'completed'))
-  const servicesRevenue = paidAppts.reduce((s, a) => s + (parseFloat(a.services?.price) || 0), 0)
-  const paidOrders      = preorders.filter(p => p.payment_status === 'paid' || (p.payment_status === 'pay_in_store' && p.status === 'retrieved'))
-  const productsRevenue = paidOrders.reduce((s, p) => s + (parseFloat(p.products?.price) || 0) * (p.quantity || 1), 0)
+  const paidAppts       = appointments.filter(apptCounts)
+  const servicesRevenue = paidAppts.reduce((s, a) => s + a._revenue, 0)
+  const paidOrders      = preorders.filter(orderCounts)
+  const productsRevenue = paidOrders.reduce((s, p) => s + p._revenue, 0)
   const totalRevenue    = servicesRevenue + productsRevenue
 
   const filteredAppts  = appointments.filter(a => !search || a.profiles?.full_name?.toLowerCase().includes(search.toLowerCase()))
@@ -139,7 +173,7 @@ export default function StudioSales() {
   const desktopOrders = filteredOrders.slice(desktopPage * DESKTOP_PER_PAGE, (desktopPage + 1) * DESKTOP_PER_PAGE)
 
   const summaryCards = [
-    { label: 'Total Revenue',  value: `$${totalRevenue.toFixed(2)}`,    sub: 'Collected via Stripe',      color: C.gold,    icon: TrendingUp },
+    { label: 'Total Revenue',  value: `$${totalRevenue.toFixed(2)}`,    sub: 'Online + in store',      color: C.gold,    icon: TrendingUp },
     { label: 'Services',       value: `$${servicesRevenue.toFixed(2)}`, sub: `${paidAppts.length} paid`,  color: '#34d399', icon: Scissors   },
     { label: 'Product Orders', value: `$${productsRevenue.toFixed(2)}`, sub: `${paidOrders.length} paid`, color: '#a78bfa', icon: Package    },
   ]
@@ -176,7 +210,7 @@ export default function StudioSales() {
         </div>
 
         {/* Date navigation */}
-        {true && <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(var(--rgb-hi),0.025)', border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+        {<div style={{ display: 'flex', alignItems: 'center', background: 'rgba(var(--rgb-hi),0.025)', border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
               <button onClick={() => setAnchor(d => navigate(d, mode, -1))} className="s-nav-btn"
                 style={{ padding: '0.6rem 1rem', background: 'none', border: 'none', borderRight: `1px solid ${C.border}`, cursor: 'pointer', color: C.muted, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all .18s', flexShrink: 0 }}>
                 <ChevronLeft size={15} strokeWidth={1.75} />
@@ -339,7 +373,7 @@ export default function StudioSales() {
                           }
                         </td>
                         <td style={{ padding: '0.6rem 1.1rem', fontFamily: 'DM Sans,sans-serif', fontSize: '0.95rem', color: (appt.payment_status === 'paid' || (appt.payment_status === 'pay_in_store' && appt.status === 'completed')) ? C.gold : C.muted, fontWeight: (appt.payment_status === 'paid' || (appt.payment_status === 'pay_in_store' && appt.status === 'completed')) ? 600 : 400 }}>
-                          {appt.services?.price ? `$${appt.services.price}` : '—'}
+                          {appt.services ? `$${apptFinalPrice(appt).toFixed(2)}` : '—'}
                         </td>
                       </tr>
                     )
@@ -385,7 +419,7 @@ export default function StudioSales() {
                               ? <span style={{ fontSize: 12, padding: '3px 8px', borderRadius: 20, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.25)', color: '#f59e0b', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>Pay in store</span>
                               : <span style={{ fontSize: 12, padding: '3px 8px', borderRadius: 20, background: 'rgba(var(--rgb-hi),0.05)', border: `1px solid ${C.border}`, color: C.muted, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>Unpaid</span>
                         }
-                        {appt.services?.price && <span style={{ fontSize: '0.8rem', color: anyPaid ? C.gold : C.muted, fontFamily: 'DM Sans,sans-serif', fontWeight: anyPaid ? 700 : 400, flexShrink: 0 }}>${appt.services.price}</span>}
+                        {appt.services && <span style={{ fontSize: '0.8rem', color: anyPaid ? C.gold : C.muted, fontFamily: 'DM Sans,sans-serif', fontWeight: anyPaid ? 700 : 400, flexShrink: 0 }}>${apptFinalPrice(appt).toFixed(2)}</span>}
                       </div>
                       {/* Line 2 */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
@@ -425,7 +459,7 @@ export default function StudioSales() {
                 <tbody>
                   {desktopOrders.map((order, i) => {
                     const s = STATUS_ORDER[order.status] || STATUS_ORDER.active
-                    const lineTotal = (parseFloat(order.products?.price) || 0) * (order.quantity || 1)
+                    const lineTotal = linePrice(order) * (order.quantity || 1)
                     return (
                       <tr key={order.id} style={{ borderBottom: i < desktopOrders.length - 1 ? `1px solid ${C.border}` : 'none' }} className="s-row">
                         <td style={{ padding: '0.6rem 1.1rem' }}>
@@ -454,9 +488,9 @@ export default function StudioSales() {
                                 : <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 20, background: 'rgba(var(--rgb-hi),0.05)', border: `1px solid ${C.border}`, color: C.muted, fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>Unpaid</span>
                           }
                         </td>
-                        <td style={{ padding: '0.6rem 1.1rem', color: C.muted, fontSize: '0.86rem', fontFamily: 'DM Sans,sans-serif' }}>{order.products?.price ? `$${order.products.price}` : '—'}</td>
+                        <td style={{ padding: '0.6rem 1.1rem', color: C.muted, fontSize: '0.86rem', fontFamily: 'DM Sans,sans-serif' }}>{linePrice(order) ? `$${linePrice(order).toFixed(2)}` : '—'}</td>
                         <td style={{ padding: '0.6rem 1.1rem', fontFamily: 'DM Sans,sans-serif', fontSize: '0.95rem', color: (order.payment_status === 'paid' || (order.payment_status === 'pay_in_store' && order.status === 'retrieved')) ? C.gold : C.muted, fontWeight: (order.payment_status === 'paid' || (order.payment_status === 'pay_in_store' && order.status === 'retrieved')) ? 600 : 400 }}>
-                          {order.products?.price ? `$${lineTotal.toFixed(2)}` : '—'}
+                          {linePrice(order) ? `$${lineTotal.toFixed(2)}` : '—'}
                         </td>
                       </tr>
                     )
@@ -484,7 +518,7 @@ export default function StudioSales() {
                   const paidStoreO = order.payment_status === 'pay_in_store' && order.status === 'retrieved'
                   const payStoreO = order.payment_status === 'pay_in_store' && order.status !== 'retrieved'
                   const anyPaidO = paidOnlineO || paidStoreO
-                  const lineTotal = (parseFloat(order.products?.price) || 0) * (order.quantity || 1)
+                  const lineTotal = linePrice(order) * (order.quantity || 1)
                   return (
                     <div key={order.id} style={{ padding: '0.875rem 1rem', minHeight: 70, borderBottom: i < MOBILE_PER_PAGE - 1 ? `1px solid ${C.border}` : 'none', borderLeft: `3px solid ${s.color}` }}>
                       {/* Line 1 */}
@@ -512,7 +546,7 @@ export default function StudioSales() {
                         {order.profiles?.full_name && <span style={{ fontSize: '0.83rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>{order.profiles.full_name}</span>}
                         <span style={{ color: 'var(--col-text)' }}>·</span>
                         <span style={{ fontSize: '0.83rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>×{order.quantity || 1}</span>
-                        {order.products?.price && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.83rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>${order.products.price} each</span></>}
+                        {linePrice(order) > 0 && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.83rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>${linePrice(order).toFixed(2)} each</span></>}
                         <span style={{ color: 'var(--col-text)' }}>·</span>
                         <span style={{ fontSize: '0.84rem', color: anyPaidO ? C.gold : 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: anyPaidO ? 700 : 400 }}>${lineTotal.toFixed(2)}</span>
                       </div>
@@ -623,12 +657,8 @@ function PeriodChart({ appointments, preorders, start, end, mode }) {
 
   const data = days.map(day => {
     const dayStr = format(day, 'yyyy-MM-dd')
-    const apptRev = appointments
-      .filter(a => (a.payment_status === 'paid' || (a.payment_status === 'pay_in_store' && a.status === 'completed')) && a.created_at?.startsWith(dayStr))
-      .reduce((s, a) => s + (parseFloat(a.services?.price) || 0), 0)
-    const ordRev = preorders
-      .filter(p => (p.payment_status === 'paid' || (p.payment_status === 'pay_in_store' && p.status === 'retrieved')) && p.created_at?.startsWith(dayStr))
-      .reduce((s, p) => s + (parseFloat(p.products?.price) || 0) * (p.quantity || 1), 0)
+    const apptRev = appointments.filter(a => a._day === dayStr).reduce((s, a) => s + a._revenue, 0)
+    const ordRev  = preorders.filter(p => p._day === dayStr).reduce((s, p) => s + p._revenue, 0)
     return { day, label: mode === 'month' ? format(day, 'd') : format(day, 'EEE'), total: apptRev + ordRev, apptRev, ordRev }
   })
 
@@ -706,7 +736,7 @@ function PeriodChart({ appointments, preorders, start, end, mode }) {
         </div>
       </div>
       <div style={{ display: 'flex', gap: BAR_GAP }}>
-        {data.map(({ day, label, total }, i) => {
+        {data.map(({ day, label }, i) => {
           const today = isToday(day)
           return (
             <div key={i} className="bar-label" style={{ ...(isMonth ? { width: BAR_W, flexShrink: 0 } : { flex: 1 }), textAlign: 'center', fontSize: isMonth ? 11 : 12, color: today ? C.goldDim : 'rgba(var(--rgb-hi),0.55)', fontFamily: 'DM Sans,sans-serif', transition: 'color .2s', fontWeight: today ? 700 : 400 }}>
@@ -753,14 +783,14 @@ function YearlyChart({ appointments, preorders, anchor }) {
 
   const byS = {}, byP = {}
   appointments.forEach(a => {
-    if (!(a.payment_status === 'paid' || (a.payment_status === 'pay_in_store' && a.status === 'completed')) || !a.created_at) return
-    const k = a.created_at.slice(0, 7)
-    byS[k] = (byS[k] || 0) + (parseFloat(a.services?.price) || 0)
+    if (!a._revenue) return
+    const k = a._day.slice(0, 7)
+    byS[k] = (byS[k] || 0) + a._revenue
   })
   preorders.forEach(p => {
-    if (!(p.payment_status === 'paid' || (p.payment_status === 'pay_in_store' && p.status === 'retrieved')) || !p.created_at) return
-    const k = p.created_at.slice(0, 7)
-    byP[k] = (byP[k] || 0) + (parseFloat(p.products?.price) || 0) * (p.quantity || 1)
+    if (!p._revenue) return
+    const k = p._day.slice(0, 7)
+    byP[k] = (byP[k] || 0) + p._revenue
   })
 
   const months = Array.from({ length: 12 }, (_, i) => {
@@ -770,7 +800,6 @@ function YearlyChart({ appointments, preorders, anchor }) {
     return { k, sRev, pRev, total: sRev + pRev, label: format(parseISO(k + '-01'), 'MMM') }
   })
 
-  const maxVal = Math.max(1, ...months.map(m => m.total))
   const curMonthKey = format(new Date(), 'yyyy-MM')
   const Y_W = 42
   const CH = 120
@@ -824,7 +853,6 @@ function YearlyChart({ appointments, preorders, anchor }) {
               <div className="chart-bars" style={{ height: CH, display: 'flex', alignItems: 'flex-end', gap: BAR_GAP, position: 'relative', zIndex: 1 }}>
                 {months.map(({ k, total, sRev, pRev }, i) => {
                   const hp = total === 0 ? 0 : Math.max(2, (total / nMax) * 100)
-                  const isCur = k === curMonthKey
                   const isSel = selected?.k === k
                   return (
                     <div key={k} className="bar-col"
@@ -952,7 +980,7 @@ function HourlyChart({ appointments, hours }) {
               </div>
             </div>
             <div style={{ display: 'flex', gap: BAR_GAP }}>
-              {counts.map(({ h, total }) => (
+              {counts.map(({ h }) => (
                 <div key={h} className="bar-label" style={{ width: BAR_W, flexShrink: 0, textAlign: 'center', fontSize: 11, color: 'rgba(var(--rgb-hi),0.55)', fontFamily: 'DM Sans,sans-serif', transition: 'color .2s' }}>{h}h</div>
               ))}
             </div>

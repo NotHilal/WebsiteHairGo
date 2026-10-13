@@ -11,6 +11,7 @@ import {
   eachDayOfInterval, isSameDay, isBefore, startOfDay, getDay,
 } from 'date-fns'
 import toast from 'react-hot-toast'
+import { slotsForDay, toMins } from '../../lib/hours'
 
 const C = {
   card: 'var(--col-modal)', gold: 'var(--col-acc)', goldDim: 'var(--col-acc)',
@@ -29,7 +30,6 @@ function timeFmt(d) {
 }
 
 const FILTERS = ['All', 'Open', 'Closed']
-const SLOTS = ['09:00','10:00','11:00','12:00','14:00','15:00','16:00','17:00','18:00']
 
 export default function StudioMessages() {
   const { user, profile, isAdmin, isManager } = useAuth()
@@ -125,7 +125,7 @@ export default function StudioMessages() {
     const role = profile?.role
     let query = supabase
       .from('tickets')
-      .select('*, user:profiles!user_id(full_name), recipient:profiles!recipient_id(full_name), appointments!appointment_id(id, date, time, payment_status, services(name, price), stylists(id, name))')
+      .select('*, user:profiles!user_id(full_name), recipient:profiles!recipient_id(full_name), appointments!appointment_id(id, date, time, payment_status, services(name, price, duration), stylists(id, name))')
       .order('updated_at', { ascending: false })
 
     if (role === 'artist') {
@@ -163,7 +163,7 @@ export default function StudioMessages() {
       } else {
         const { data: direct } = await supabase
           .from('tickets')
-          .select('*, user:profiles!user_id(full_name), recipient:profiles!recipient_id(full_name), appointments!appointment_id(id, date, time, payment_status, services(name, price), stylists(id, name))')
+          .select('*, user:profiles!user_id(full_name), recipient:profiles!recipient_id(full_name), appointments!appointment_id(id, date, time, payment_status, services(name, price, duration), stylists(id, name))')
           .eq('id', paramId)
           .single()
         if (direct) {
@@ -242,7 +242,8 @@ export default function StudioMessages() {
     if (!selected?.appointment_id || creditWorking) return
     setCreditWorking(true)
     try {
-      await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', selected.appointment_id)
+      const { error } = await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', selected.appointment_id)
+      if (error) throw error
       await supabase.from('ticket_messages').insert({
         ticket_id: selected.id, sender_id: user.id,
         content: 'Your appointment has been cancelled. Please contact us if you have any questions.',
@@ -261,7 +262,10 @@ export default function StudioMessages() {
       const { error } = await supabase.functions.invoke('process-refund', {
         body: { type: 'cancel-with-credit', id: selected.appointment_id }
       })
-      if (error) throw error
+      if (error) {
+        const body = await error.context?.json?.().catch(() => null)
+        throw new Error(body?.error || 'Failed to issue credit')
+      }
       await supabase.from('ticket_messages').insert({
         ticket_id: selected.id, sender_id: user.id,
         content: '✓ Your appointment has been cancelled and store credit has been issued to your account.',
@@ -269,7 +273,7 @@ export default function StudioMessages() {
       })
       toast.success('Credit issued & appointment cancelled')
       loadTicketsRef.current(); fetchRequestsCount(); loadMessages(selected.id)
-    } catch { toast.error('Failed to issue credit') }
+    } catch (err) { toast.error(err.message || 'Failed to issue credit') }
     setCreditWorking(false)
   }
 
@@ -292,9 +296,10 @@ export default function StudioMessages() {
     if (!reschedModal || !reschedDate || !reschedStylist) { setRTakenSlots([]); setRBlockedHours([]); return }
     const apptId   = selected?.appointment_id
     const duration = selected?.appointments?.services?.duration || 60
+    const daySlots = slotsForDay(new Date(reschedDate + 'T00:00:00'), duration)
     Promise.all([
       (async () => {
-        let q = supabase.from('appointments').select('time, services(duration)').eq('stylist_id', reschedStylist).eq('date', reschedDate).neq('status', 'cancelled')
+        let q = supabase.from('appointments').select('time, duration_minutes').eq('stylist_id', reschedStylist).eq('date', reschedDate).neq('status', 'cancelled')
         if (apptId) q = q.neq('id', apptId)
         return q
       })(),
@@ -304,8 +309,8 @@ export default function StudioMessages() {
       for (const appt of (appts || [])) {
         const [ah, am] = appt.time.slice(0, 5).split(':').map(Number)
         const apptStart = ah * 60 + am
-        const apptEnd   = apptStart + (appt.services?.duration || 60)
-        for (const slot of SLOTS) {
+        const apptEnd   = apptStart + (appt.duration_minutes || 60)
+        for (const slot of daySlots) {
           const [sh, sm] = slot.split(':').map(Number)
           const slotStart = sh * 60 + sm
           const slotEnd   = slotStart + duration
@@ -324,7 +329,7 @@ export default function StudioMessages() {
       // Fetch full old appointment to copy its fields
       const { data: old, error: fetchErr } = await supabase
         .from('appointments')
-        .select('user_id, service_id, stylist_id, payment_status, payment_intent_id, notes, guest_name, guest_email, guest_phone')
+        .select('user_id, service_id, stylist_id, payment_status, payment_intent_id, notes, guest_name, guest_email, guest_phone, final_price, discount_amount, coupon_id')
         .eq('id', selected.appointment_id)
         .single()
       if (fetchErr) throw fetchErr
@@ -343,13 +348,21 @@ export default function StudioMessages() {
         guest_name:       old.guest_name,
         guest_email:      old.guest_email,
         guest_phone:      old.guest_phone,
+        final_price:      old.final_price,
+        discount_amount:  old.discount_amount,
+        coupon_id:        old.coupon_id,
       }
       const { data: newAppt, error: insertErr } = await supabase
         .from('appointments').insert(newRow).select('id').single()
+      if (insertErr?.code === '23505' || insertErr?.code === '23P01') throw new Error('That time overlaps another booking for this stylist')
       if (insertErr) throw insertErr
 
-      // Cancel the old appointment only after the new one is confirmed
-      await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', selected.appointment_id)
+      // Cancel the old appointment only after the new one is confirmed. The
+      // payment now belongs to the new booking, so the old one stops counting as paid.
+      await supabase.from('appointments').update({
+        status: 'cancelled',
+        ...(old.payment_status === 'paid' ? { payment_status: 'rescheduled' } : {}),
+      }).eq('id', selected.appointment_id)
 
       // Point the ticket at the new appointment
       await supabase.from('tickets').update({ appointment_id: newAppt.id }).eq('id', selected.id)
@@ -366,7 +379,7 @@ export default function StudioMessages() {
       setReschedModal(false)
       toast.success('Appointment rescheduled')
       loadTicketsRef.current(); fetchRequestsCount(); loadMessages(selected.id)
-    } catch { toast.error('Failed to reschedule') }
+    } catch (err) { toast.error(err.message || 'Failed to reschedule') }
     setReschedWorking(false)
   }
 
@@ -374,16 +387,26 @@ export default function StudioMessages() {
     if (!selected || !couponCode.trim() || couponSending) return
     setCouponSending(true)
     try {
+      // Attach the coupon to the client's account so personal codes work too
+      const code = couponCode.trim().toUpperCase()
+      const { data: coupon } = await supabase.from('coupons').select('id, active').eq('code', code).maybeSingle()
+      if (!coupon) throw new Error('No coupon with that code')
+      if (!coupon.active) throw new Error('That coupon is not active')
+      if (selected.user_id) {
+        const { error: ucErr } = await supabase.from('user_coupons')
+          .upsert({ user_id: selected.user_id, coupon_id: coupon.id, used: false, granted_by: 'admin' }, { onConflict: 'user_id,coupon_id' })
+        if (ucErr) throw ucErr
+      }
       await supabase.from('ticket_messages').insert({
         ticket_id: selected.id, sender_id: user.id,
-        content: `🎁 Here's a coupon code just for you: ${couponCode.trim().toUpperCase()} — Apply it at checkout on your next booking.`,
+        content: `🎁 Here's a coupon code just for you: ${code} — it's been added to your account. Apply it at checkout on your next booking.`,
         is_from_admin: true, read: false
       })
       await supabase.from('tickets').update({ updated_at: new Date().toISOString() }).eq('id', selected.id)
       setCouponModal(false); setCouponCode('')
       toast.success('Coupon sent to client')
       loadMessages(selected.id); loadTicketsRef.current()
-    } catch { toast.error('Failed to send coupon') }
+    } catch (err) { toast.error(err.message || 'Failed to send coupon') }
     setCouponSending(false)
   }
 
@@ -878,17 +901,18 @@ export default function StudioMessages() {
                 {(() => {
                   const rIsOff = d =>
                     isBefore(d, startOfDay(new Date())) ||
-                    getDay(d) === 0 ||
                     rBlockedDates.includes(format(d, 'yyyy-MM-dd')) ||
                     (reschedStylist && rStylistDayOffs.includes(format(d, 'yyyy-MM-dd')))
+                  const reschedDur = selected?.appointments?.services?.duration || 60
                   const isSlotUnavailable = slot =>
-                    rTakenSlots.includes(slot) || rBlockedHours.some(bh => bh.slice(0, 5) === slot)
+                    rTakenSlots.includes(slot) || rBlockedHours.some(bh => toMins(bh) >= toMins(slot) && toMins(bh) < toMins(slot) + reschedDur)
                   const monthStart = startOfMonth(reschedMonth)
                   const monthEnd   = endOfMonth(reschedMonth)
                   const days       = eachDayOfInterval({ start: monthStart, end: monthEnd })
                   const startPad   = getDay(monthStart) === 0 ? 6 : getDay(monthStart) - 1
-                  const morning    = SLOTS.filter(s => parseInt(s) < 13)
-                  const afternoon  = SLOTS.filter(s => parseInt(s) >= 13)
+                  const daySlots   = reschedDate ? slotsForDay(parseISO(reschedDate), reschedDur) : []
+                  const morning    = daySlots.filter(s => parseInt(s) < 13)
+                  const afternoon  = daySlots.filter(s => parseInt(s) >= 13)
                   const selDateObj = reschedDate ? parseISO(reschedDate) : null
                   return (
                     <div style={{ marginBottom: '1.25rem' }}>

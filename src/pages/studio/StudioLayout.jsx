@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react'
+﻿import { useState, useEffect, useRef, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -277,7 +277,7 @@ export default function StudioLayout() {
 
         <main className="studio-main" style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '1.75rem 2rem' }}>
           <div className="studio-outlet" style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', maxWidth: 1200, width: '100%', margin: '0 auto' }}>
-            <Outlet />
+            <Suspense fallback={null}><Outlet /></Suspense>
           </div>
         </main>
       </div>

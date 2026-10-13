@@ -1,4 +1,5 @@
-﻿import { BrowserRouter, Routes, Route } from 'react-router-dom'
+﻿import { lazy, Suspense } from 'react'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { AuthProvider } from './contexts/AuthContext'
 import { CartProvider } from './contexts/CartContext'
@@ -15,29 +16,37 @@ import Profile from './pages/Profile'
 import ResetPassword from './pages/ResetPassword'
 import Chat from './pages/Chat'
 import StudioGate from './pages/studio/StudioGate'
-import StudioLayout from './pages/studio/StudioLayout'
-import StudioDashboard from './pages/studio/StudioDashboard'
-import StudioProducts from './pages/studio/StudioProducts'
-import StudioGallery from './pages/studio/StudioGallery'
-import StudioMessages from './pages/studio/StudioMessages'
-import StudioCoupons from './pages/studio/StudioCoupons'
-import StudioUsers from './pages/studio/StudioUsers'
-import StudioServices from './pages/studio/StudioServices'
-import StudioStylists from './pages/studio/StudioStylists'
-import StudioBlockedDates from './pages/studio/StudioBlockedDates'
-import StudioSales from './pages/studio/StudioSales'
-import StudioAppointmentsList from './pages/studio/StudioAppointmentsList'
-import StudioSchedule from './pages/studio/StudioSchedule'
-import StudioOrders from './pages/studio/StudioOrders'
-import StudioHomeDisplay from './pages/studio/StudioHomeDisplay'
-import StudioTimesheets  from './pages/studio/StudioTimesheets'
-import StudioPayRuns     from './pages/studio/StudioPayRuns'
-import StudioPaysheet    from './pages/studio/StudioPaysheet'
-import StudioLogs                from './pages/studio/StudioLogs'
 import ProtectedRoute from './components/auth/ProtectedRoute'
 import AdminRoute from './components/auth/AdminRoute'
 import AdminOnlyRoute from './components/auth/AdminOnlyRoute'
 import ManagerRoute from './components/auth/ManagerRoute'
+
+// The studio is only for staff, so its code is downloaded on first visit
+const StudioLayout = lazy(() => import('./pages/studio/StudioLayout'))
+const StudioDashboard = lazy(() => import('./pages/studio/StudioDashboard'))
+const StudioProducts = lazy(() => import('./pages/studio/StudioProducts'))
+const StudioGallery = lazy(() => import('./pages/studio/StudioGallery'))
+const StudioMessages = lazy(() => import('./pages/studio/StudioMessages'))
+const StudioCoupons = lazy(() => import('./pages/studio/StudioCoupons'))
+const StudioUsers = lazy(() => import('./pages/studio/StudioUsers'))
+const StudioServices = lazy(() => import('./pages/studio/StudioServices'))
+const StudioStylists = lazy(() => import('./pages/studio/StudioStylists'))
+const StudioBlockedDates = lazy(() => import('./pages/studio/StudioBlockedDates'))
+const StudioSales = lazy(() => import('./pages/studio/StudioSales'))
+const StudioAppointmentsList = lazy(() => import('./pages/studio/StudioAppointmentsList'))
+const StudioSchedule = lazy(() => import('./pages/studio/StudioSchedule'))
+const StudioOrders = lazy(() => import('./pages/studio/StudioOrders'))
+const StudioHomeDisplay = lazy(() => import('./pages/studio/StudioHomeDisplay'))
+const StudioTimesheets = lazy(() => import('./pages/studio/StudioTimesheets'))
+const StudioPayRuns = lazy(() => import('./pages/studio/StudioPayRuns'))
+const StudioPaysheet = lazy(() => import('./pages/studio/StudioPaysheet'))
+const StudioLogs = lazy(() => import('./pages/studio/StudioLogs'))
+
+const studioFallback = (
+  <div className="min-h-screen flex items-center justify-center">
+    <div className="w-6 h-6 border-2 border-[#B8D4E8]/30 border-t-[#B8D4E8] rounded-full animate-spin" />
+  </div>
+)
 
 export default function App() {
   return (
@@ -76,7 +85,7 @@ export default function App() {
 
           {/* Studio (admin) routes */}
           <Route path="/studio" element={<StudioGate />} />
-          <Route path="/studio/*" element={<AdminRoute><StudioLayout /></AdminRoute>}>
+          <Route path="/studio/*" element={<AdminRoute><Suspense fallback={studioFallback}><StudioLayout /></Suspense></AdminRoute>}>
             <Route path="dashboard"    element={<StudioDashboard />} />
             <Route path="appointments" element={<StudioAppointmentsList />} />
             <Route path="schedule"     element={<StudioSchedule />} />

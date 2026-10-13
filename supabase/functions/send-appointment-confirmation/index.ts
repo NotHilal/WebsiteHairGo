@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
     }
 
     const { data: appt } = await admin.from('appointments')
-      .select('id, user_id, date, time, notes, payment_status, payment_intent_id, guest_name, guest_email, created_at, confirmation_sent_at, services(name, price), stylists(name), profiles(full_name, email)')
+      .select('id, user_id, date, time, notes, payment_status, payment_intent_id, final_price, guest_name, guest_email, created_at, confirmation_sent_at, services(name, price), stylists(name), profiles(full_name, email)')
       .eq('id', appointmentId).maybeSingle()
     if (!appt) return json({ error: 'Appointment not found' }, 404)
 
@@ -70,15 +70,15 @@ Deno.serve(async (req) => {
     const paymentStatus = appt.payment_status
     const isInStore = paymentStatus === 'pay_in_store'
 
+    // final_price is set by the server when the booking is made
     let priceNum = parseFloat(appt.services?.price ?? 0)
-    if (appt.payment_status === 'paid' && appt.payment_intent_id && Deno.env.get('STRIPE_SECRET_KEY')) {
+    if (appt.final_price != null) {
+      priceNum = parseFloat(appt.final_price)
+    } else if (appt.payment_status === 'paid' && appt.payment_intent_id && Deno.env.get('STRIPE_SECRET_KEY')) {
       const res = await fetch(`https://api.stripe.com/v1/payment_intents/${encodeURIComponent(appt.payment_intent_id)}`, {
         headers: { Authorization: `Bearer ${Deno.env.get('STRIPE_SECRET_KEY')}` },
       })
       if (res.ok) priceNum = (await res.json()).amount_received / 100
-    } else {
-      const m = /Final: \$(\d+(?:\.\d{1,2})?)\]/.exec(appt.notes ?? '')
-      if (m) priceNum = Math.min(priceNum, parseFloat(m[1]))
     }
 
     const rawService = appt.services?.name ?? 'Appointment'

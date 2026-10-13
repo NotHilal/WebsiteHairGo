@@ -8,7 +8,8 @@
 -- tickets, ticket_messages, blocked_hours, salon_settings, timesheets, pay_runs.
 --
 -- Run this ONCE, top to bottom, in the SQL Editor of the new Supabase project.
--- Then run security-hardening.sql — it replaces several policies below.
+-- Then run security-hardening.sql and fix-2026-10-13.sql, in that order —
+-- they replace several policies and functions below (see SETUP.md).
 -- =========================================================================
 
 create extension if not exists pgcrypto;

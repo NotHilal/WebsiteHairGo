@@ -2,9 +2,11 @@
 import { Check, Edit2, X, ArrowLeft, Clock, ChevronRight, ChevronLeft, Info, AlertCircle, Download } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../lib/supabase'
+import { sheetMins, breakLabel } from '../../lib/pay'
+import { fetchAll } from '../../lib/fetchAll'
 import { useLogAction } from '../../hooks/useLogAction'
 import {
-  format, differenceInMinutes,
+  format,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth,
   eachDayOfInterval, isSameDay, isSameMonth,
   addMonths, subMonths,
@@ -34,10 +36,6 @@ function fmtMins(mins) {
 const fmt = n => `$${(n || 0).toFixed(2)}`
 const inp = { background: 'rgba(var(--rgb-hi),0.06)', border: '1px solid rgba(var(--rgb-hi),0.1)', borderRadius: 8, padding: '0.4rem 0.6rem 0.4rem 1.5rem', fontSize: '0.8rem', color: 'var(--col-text)', outline: 'none', fontFamily: 'DM Sans,sans-serif', width: '100%', boxSizing: 'border-box', transition: 'border-color .2s' }
 
-function sheetMins(t) {
-  const raw = Math.max(0, differenceInMinutes(new Date(t.clock_out), new Date(t.clock_in)))
-  return raw >= 360 ? raw - 45 : raw
-}
 
 // ── Session / Day info modal ──────────────────────────────────────
 function SessionModal({ sessions, rate, onClose }) {
@@ -46,7 +44,6 @@ function SessionModal({ sessions, rate, onClose }) {
   const t0          = sessions[0]
   const totalMins   = sessions.reduce((a, t) => a + sheetMins(t), 0)
   const paidMins    = sessions.filter(t => t.paid_at).reduce((a, t) => a + sheetMins(t), 0)
-  const totalEarned = (totalMins / 60) * rate
   const totalOwed   = ((totalMins - paidMins) / 60) * rate
 
   return (
@@ -72,7 +69,7 @@ function SessionModal({ sessions, rate, onClose }) {
               [
                 ['Clock In',  format(new Date(t0.clock_in),  'HH:mm'), C.green ],
                 ['Clock Out', format(new Date(t0.clock_out), 'HH:mm'), C.red   ],
-                ['Break',     differenceInMinutes(new Date(t0.clock_out), new Date(t0.clock_in)) >= 360 ? '45m (auto)' : 'None', C.muted],
+                ['Break',     breakLabel(t0) === 'None' ? 'None' : `${breakLabel(t0)} (auto)`, C.muted],
                 ['Net Time',  fmtMins(sheetMins(t0)), C.gold ],
                 ['Earned',    rate > 0 ? fmt((sheetMins(t0) / 60) * rate) : 'No rate set', C.white],
                 ['Status',    t0.paid_at ? `Paid · ${format(new Date(t0.paid_at), 'MMM d, yyyy')}` : 'Unpaid', t0.paid_at ? C.green : C.red],
@@ -342,17 +339,21 @@ export default function StudioPayRuns() {
   async function load() {
     setLoading(true)
     setError(null)
-    const [{ data: stys, error: e1 }, { data: sheets, error: e2 }, { data: runs, error: e3 }, { data: open }] = await Promise.all([
-      supabase.from('stylists').select('id, name, photo_url, hourly_rate').not('profile_id', 'is', null).order('display_order'),
-      supabase.from('timesheets')
+    const [{ data: stys, error: e1 }, { data: sheets, error: e2 }, { data: runs, error: e3 }, { data: open }, { data: rates }] = await Promise.all([
+      supabase.from('stylists').select('id, name, photo_url').not('profile_id', 'is', null).order('display_order'),
+      fetchAll(() => supabase.from('timesheets')
         .select('id, stylist_id, clock_in, clock_out, break_minutes, paid_at')
         .not('clock_out', 'is', null)
-        .order('clock_in', { ascending: false }),
-      supabase.from('pay_runs').select('id, stylist_id, tips, commissions, other'),
+        .order('clock_in', { ascending: false })
+        .order('id')),
+      // Only extras not yet paid out count towards what is owed
+      supabase.from('pay_runs').select('id, stylist_id, tips, commissions, other').is('paid_at', null),
       supabase.from('timesheets').select('stylist_id').is('clock_out', null),
+      supabase.from('stylist_rates').select('stylist_id, hourly_rate'),
     ])
     if (e1 || e2 || e3) { setError('Could not load pay data — check your connection.'); setLoading(false); return }
-    setStylists(stys || [])
+    const rateOf = Object.fromEntries((rates || []).map(r => [r.stylist_id, r.hourly_rate]))
+    setStylists((stys || []).map(s => ({ ...s, hourly_rate: rateOf[s.id] ?? null })))
     setTimesheets(sheets || [])
     setPayRuns(runs || [])
     setActiveSessions(new Set((open || []).map(t => t.stylist_id)))
@@ -392,8 +393,11 @@ export default function StudioPayRuns() {
     if (ids.size === 0) return toast.error('Select at least one session')
     const arr  = [...ids]
     const mins = timesheets.filter(t => arr.includes(t.id)).reduce((a, t) => a + sheetMins(t), 0)
-    const { error } = await supabase.from('timesheets').update({ paid_at: new Date().toISOString() }).in('id', arr)
+    const paidAt = new Date().toISOString()
+    const { error } = await supabase.from('timesheets').update({ paid_at: paidAt }).in('id', arr)
     if (error) return toast.error(error.message)
+    // Outstanding tips/commissions are paid in the same run and kept as history
+    await supabase.from('pay_runs').update({ paid_at: paidAt }).eq('stylist_id', stylist.id).is('paid_at', null)
     toast.success(`${stylist.name} — ${fmtMins(mins)} marked as paid`)
     log('payrun.paid', {
       entityType: 'payrun', entityId: stylist.id,
@@ -415,7 +419,8 @@ export default function StudioPayRuns() {
   async function saveExtras(stylist) {
     setSaving(true)
     const extras = { tips: parseFloat(editVals.tips) || 0, commissions: parseFloat(editVals.commissions) || 0, other: parseFloat(editVals.other) || 0 }
-    await supabase.from('pay_runs').delete().eq('stylist_id', stylist.id)
+    // Replace only the unpaid extras — paid ones stay as history
+    await supabase.from('pay_runs').delete().eq('stylist_id', stylist.id).is('paid_at', null)
     const { error } = await supabase.from('pay_runs').insert({ stylist_id: stylist.id, ...extras, period_start: format(new Date(), 'yyyy-MM-dd'), period_end: format(new Date(), 'yyyy-MM-dd'), earnings: 0 })
     setSaving(false)
     if (error) return toast.error(error.message)
@@ -473,9 +478,8 @@ export default function StudioPayRuns() {
         }
         curWeekKey = wKey; curWeekLabel = wLabel
 
-        const raw  = Math.max(0, differenceInMinutes(new Date(t.clock_out), new Date(t.clock_in)))
-        const net  = raw >= 360 ? raw - 45 : raw
-        const brk  = raw >= 360 ? '45 min' : 'None'
+        const net  = sheetMins(t)
+        const brk  = breakLabel(t)
         const earn = (net / 60) * rate
         weekMins  += net; weekEarned += earn
 
@@ -604,7 +608,7 @@ export default function StudioPayRuns() {
         {/* Extras panel */}
         {editing && (
           <div style={{ flexShrink: 0, padding: '1rem 1.25rem', background: 'var(--col-acc)', border: `1px solid ${C.goldBorder}`, borderRadius: 14 }}>
-            <p style={{ fontSize: 9, letterSpacing: '0.2em', textTransform: 'uppercase', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, marginBottom: '0.75rem' }}>Extras for {stylist.name} — cumulative</p>
+            <p style={{ fontSize: 9, letterSpacing: '0.2em', textTransform: 'uppercase', color: C.goldDim, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, marginBottom: '0.75rem' }}>Unpaid extras for {stylist.name}</p>
             <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
               {[['Tips', 'tips'], ['Commissions', 'commissions'], ['Other', 'other']].map(([label, key]) => (
                 <div key={key} style={{ minWidth: 130, flex: 1 }}>

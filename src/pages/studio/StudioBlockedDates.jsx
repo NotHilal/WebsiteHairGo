@@ -12,6 +12,7 @@ import {
   eachDayOfInterval, getDay, isSameDay, isBefore, startOfDay,
 } from 'date-fns'
 import toast from 'react-hot-toast'
+import { toMins, SLOTS } from '../../lib/hours'
 
 const C = {
   card: 'var(--col-modal)', modal: 'var(--col-modal)',
@@ -24,7 +25,6 @@ const C = {
   success: '#4ade80', successBg: 'rgba(74,222,128,0.1)', successBorder: 'rgba(74,222,128,0.25)',
 }
 
-const SLOTS = ['09:00','10:00','11:00','12:00','14:00','15:00','16:00','17:00','18:00','19:00','20:00','21:00']
 const WDAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
 
 // ── Shared button / input styles ──
@@ -203,7 +203,6 @@ export default function StudioBlockedDates() {
     : myRequests.reduce((acc, r) => { acc[r.date] = r; return acc }, {})
 
   // ── Monthly quota (worker only) ──
-  const monthStart = format(startOfMonth(new Date()), 'yyyy-MM-dd')
   const monthEnd   = format(endOfMonth(new Date()),   'yyyy-MM-dd')
   const today      = format(new Date(),               'yyyy-MM-dd')
 
@@ -219,7 +218,7 @@ export default function StudioBlockedDates() {
   const isToday  = d => isSameDay(d, new Date())
 
   function getDayStyle(key, day) {
-    if (!!salonBlockedMap[key])         return { bg: C.dangerBg, border: C.dangerBorder, num: C.danger }
+    if (salonBlockedMap[key])         return { bg: C.dangerBg, border: C.dangerBorder, num: C.danger }
     if (pendingMap[key])                return { bg: C.infoBg,   border: C.infoBorder,   num: C.info }
     if ((hoursMap[key] || []).length)   return { bg: C.warnBg,   border: C.warnBorder,   num: C.warning }
     if (isToday(day))                   return { bg: C.goldBg,   border: C.goldBorder,   num: C.gold }
@@ -257,7 +256,7 @@ export default function StudioBlockedDates() {
       if (error) throw error
       toast.success('Day blocked')
       log('blocked_dates.salon_blocked', { entityType: 'blocked_dates', details: { message: `blocked salon day ${selected.key}${reason.trim() ? ` — ${reason.trim()}` : ''}` } })
-      closeModal(); invalidate('studio_blocked'); load()
+      closeModal(); invalidate('blocked_dates'); load()
     } catch (e) { toast.error(e.message) }
     finally { setSaving(false) }
   }
@@ -265,14 +264,36 @@ export default function StudioBlockedDates() {
   async function unblockSalonDay() {
     setSaving(true)
     const rec = salonBlocked.find(d => (d.date || d) === selected.key)
-    if (rec?.id) await supabase.from('blocked_dates').delete().eq('id', rec.id)
+    if (rec?.id) {
+      const { error } = await supabase.from('blocked_dates').delete().eq('id', rec.id)
+      if (error) { toast.error(error.message); setSaving(false); return }
+    }
     toast.success('Day reopened')
     log('blocked_dates.salon_unblocked', { entityType: 'blocked_dates', details: { message: `unblocked salon day ${selected.key}` } })
-    setSaving(false); closeModal(); invalidate('studio_blocked'); load()
+    setSaving(false); closeModal(); invalidate('blocked_dates'); load()
+  }
+
+  // Bookings that would be left without their stylist
+  async function bookingsFor(stylistId, date, hours = null) {
+    let q = supabase.from('appointments').select('id, time, duration_minutes')
+      .eq('date', date).in('status', ['pending', 'confirmed'])
+    if (stylistId) q = q.eq('stylist_id', stylistId)
+    const { data } = await q
+    if (!hours) return data || []
+    return (data || []).filter(a => {
+      const start = toMins(a.time)
+      const end   = start + (a.duration_minutes || 60)
+      return hours.some(h => toMins(h) >= start && toMins(h) < end)
+    })
   }
 
   // ── Admin: approve / reject ──
   async function approveRequest(req) {
+    const clash = await bookingsFor(req.stylist_id, req.date)
+    if (clash.length) {
+      toast.error(`${req.stylist?.name || 'This stylist'} has ${clash.length} booking${clash.length !== 1 ? 's' : ''} on ${req.date} — move or cancel them before approving.`)
+      return
+    }
     await supabase.from('blocked_dates').update({ status: 'approved' }).eq('id', req.id)
     toast.success('Approved')
     log('blocked_dates.approved', { entityType: 'blocked_dates', entityId: req.id, details: { message: `approved day-off for ${req.stylist?.name || 'artist'} on ${req.date}` } })
@@ -289,9 +310,21 @@ export default function StudioBlockedDates() {
   async function saveHours() {
     setSaving(true)
     try {
+      // Don't block hours that already have clients booked in them
+      const newHours = selHours.filter(h => !(hoursMap[selected.key] || []).includes(h))
+      if (newHours.length) {
+        const clash = await bookingsFor((!isAdmin && !isManager) ? myStylist.id : null, selected.key, newHours)
+        if (clash.length) {
+          toast.error(`${clash.length} booking${clash.length !== 1 ? 's' : ''} already in those hours — move or cancel ${clash.length !== 1 ? 'them' : 'it'} first.`)
+          setSaving(false); return
+        }
+      }
+
       if (!isAdmin && !isManager) {
-        // Quota check: count existing hours this month excluding today's (they'll be replaced)
-        const existing = myHours.filter(h => h.date >= today && h.date <= monthEnd && h.date !== selected.key).length
+        // Quota is per month of the day being blocked; that day's hours are replaced
+        const selMonthStart = format(startOfMonth(selected.day), 'yyyy-MM-dd')
+        const selMonthEnd   = format(endOfMonth(selected.day), 'yyyy-MM-dd')
+        const existing = myHours.filter(h => h.date >= (today > selMonthStart ? today : selMonthStart) && h.date <= selMonthEnd && h.date !== selected.key).length
         if (existing + selHours.length > effectiveMaxHours) {
           toast.error(`Monthly limit: ${effectiveMaxHours} hours. This would bring you to ${existing + selHours.length}.`)
           setSaving(false); return
@@ -310,7 +343,7 @@ export default function StudioBlockedDates() {
         }
       }
       toast.success(selHours.length ? `${selHours.length} slot${selHours.length !== 1 ? 's' : ''} blocked` : 'Hours cleared')
-      closeModal(); invalidate('studio_blocked'); load()
+      closeModal(); invalidate('blocked_dates'); load()
     } catch (e) { toast.error(e.message) }
     finally { setSaving(false) }
   }
@@ -333,7 +366,11 @@ export default function StudioBlockedDates() {
   async function cancelDayOff() {
     if (!selected.request) return
     setSaving(true)
-    await supabase.from('blocked_dates').delete().eq('id', selected.request.id)
+    const { data: deleted } = await supabase.from('blocked_dates').delete().eq('id', selected.request.id).select('id')
+    if (!deleted?.length) {
+      toast.error('Approved days off can only be removed by a manager')
+      setSaving(false); return
+    }
     toast.success('Request cancelled')
     setSaving(false); closeModal(); load()
   }

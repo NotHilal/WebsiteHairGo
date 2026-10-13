@@ -1,9 +1,11 @@
 ﻿import { useState, useEffect } from 'react'
 import { Clock, AlertCircle, ChevronLeft, ChevronRight, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { sheetMins, breakLabel } from '../../lib/pay'
+import { fetchAll } from '../../lib/fetchAll'
 import { useAuth } from '../../contexts/AuthContext'
 import {
-  format, differenceInMinutes,
+  format,
   startOfWeek, endOfWeek, startOfMonth, endOfMonth,
   eachDayOfInterval, isSameDay, isSameMonth,
   addMonths, subMonths,
@@ -21,10 +23,6 @@ const C = {
 const TABLE_PER_PAGE = 15
 const TABLE_COLS = '1fr 58px 70px 66px 28px'
 
-function sheetMins(t) {
-  const raw = Math.max(0, differenceInMinutes(new Date(t.clock_out), new Date(t.clock_in)))
-  return raw >= 360 ? raw - 45 : raw
-}
 
 function fmtMins(mins) {
   if (!mins || mins <= 0) return '—'
@@ -68,7 +66,7 @@ function SessionModal({ sessions, rate, onClose }) {
               [
                 ['Clock In',  format(new Date(t0.clock_in),  'HH:mm'), C.green ],
                 ['Clock Out', format(new Date(t0.clock_out), 'HH:mm'), C.red   ],
-                ['Break',     differenceInMinutes(new Date(t0.clock_out), new Date(t0.clock_in)) >= 360 ? '45m (auto)' : 'None', C.muted],
+                ['Break',     breakLabel(t0) === 'None' ? 'None' : `${breakLabel(t0)} (auto)`, C.muted],
                 ['Net Time',  fmtMins(sheetMins(t0)), C.gold ],
                 ['Earned',    rate > 0 ? fmt((sheetMins(t0) / 60) * rate) : 'No rate set', C.white],
                 ['Status',    t0.paid_at ? `Paid · ${format(new Date(t0.paid_at), 'MMM d, yyyy')}` : 'Unpaid', t0.paid_at ? C.green : C.red],
@@ -326,16 +324,18 @@ export default function StudioPaysheet() {
     setLoading(true)
     setError(null)
     const { data: linked } = await supabase
-      .from('stylists').select('id, name, hourly_rate').eq('profile_id', user.id).single()
+      .from('stylists').select('id, name').eq('profile_id', user.id).maybeSingle()
     if (!linked) { setNotLinked(true); setLoading(false); return }
-    setStylist(linked)
+    const { data: rate } = await supabase.from('stylist_rates').select('hourly_rate').eq('stylist_id', linked.id).maybeSingle()
+    setStylist({ ...linked, hourly_rate: rate?.hourly_rate ?? null })
     setNotLinked(false)
-    const { data, error: e } = await supabase
+    const { data, error: e } = await fetchAll(() => supabase
       .from('timesheets')
       .select('id, clock_in, clock_out, break_minutes, paid_at')
       .eq('stylist_id', linked.id)
       .not('clock_out', 'is', null)
       .order('clock_in', { ascending: false })
+      .order('id'))
     if (e) { setError('Could not load sessions — check your connection.'); setLoading(false); return }
     setSheets(data || [])
     setLoading(false)
@@ -356,7 +356,7 @@ export default function StudioPaysheet() {
 
   if (loading) return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ width: 28, height: 28, borderRadius: '50%', border: '2px solid rgba(var(--rgb-acc),0.18)', borderTopcolor: 'var(--col-acc)', animation: 'spin 0.7s linear infinite' }} />
+      <div style={{ width: 28, height: 28, borderRadius: '50%', border: '2px solid rgba(var(--rgb-acc),0.18)', borderTopColor: 'var(--col-acc)', animation: 'spin 0.7s linear infinite' }} />
       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
     </div>
   )

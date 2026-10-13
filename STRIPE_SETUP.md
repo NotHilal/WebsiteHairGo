@@ -14,7 +14,6 @@ Create a `.env` file in `hairgo/` (copy from `.env.example` if it exists):
 ```
 VITE_SUPABASE_URL=...
 VITE_SUPABASE_ANON_KEY=...
-VITE_STUDIO_PASSWORD=...
 VITE_STRIPE_PUBLISHABLE_KEY=pk_test_...   ← add this
 ```
 
@@ -34,8 +33,9 @@ npx supabase link --project-ref YOUR_PROJECT_REF
 # Set the Stripe secret key as a secret (never commit this to git)
 npx supabase secrets set STRIPE_SECRET_KEY=sk_test_...
 
-# Deploy both functions
+# Deploy the payment functions
 npx supabase functions deploy create-payment-intent
+npx supabase functions deploy book-in-store
 npx supabase functions deploy stripe-webhook
 ```
 

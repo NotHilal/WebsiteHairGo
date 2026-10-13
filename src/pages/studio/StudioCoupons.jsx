@@ -2,6 +2,7 @@
 import { Plus, X, Save, Trash2, Edit2, Search, Scissors, AlertTriangle, ChevronRight, ChevronLeft, UserPlus } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getOrFetch, invalidate } from '../../lib/cache'
+import { fetchAll } from '../../lib/fetchAll'
 import { useAuth } from '../../contexts/AuthContext'
 import { useLogAction } from '../../hooks/useLogAction'
 import { format } from 'date-fns'
@@ -17,7 +18,7 @@ const C = {
 
 const inp = { width: '100%', background: 'rgba(var(--rgb-hi),0.05)', border: '1px solid rgba(var(--rgb-hi),0.1)', borderRadius: 9, padding: '0.55rem 0.8rem', fontSize: '1.02rem', color: 'var(--col-text)', outline: 'none', fontFamily: 'DM Sans,sans-serif', fontWeight: 300, transition: 'border-color .2s', boxSizing: 'border-box' }
 const lbl = { display: 'block', fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, marginBottom: 6 }
-const EMPTY = { code: '', discount_type: 'percentage', discount_value: '', expiry_date: '' }
+const EMPTY = { code: '', discount_type: 'percentage', discount_value: '', expiry_date: '', is_public: false, max_uses: '' }
 
 function ModalWrap({ children, onClose, maxWidth = 440 }) {
   return (
@@ -206,12 +207,13 @@ export default function StudioCoupons() {
       const [{ data: c }, { data: uc }, { data: u }] = await Promise.all([
         supabase.from('coupons').select('*').order('created_at', { ascending: false }),
         supabase.from('user_coupons').select('*, profiles(full_name)').order('created_at', { ascending: false }),
-        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
+        fetchAll(() => supabase.from('profiles').select('*').order('created_at', { ascending: false }).order('id')),
       ])
       const map = {}
       const ids = new Set()
       ;(uc || []).forEach(r => {
-        map[r.coupon_id] = { name: r.profiles?.full_name || 'Unknown', used: r.used }
+        // Most recent holder; actions below target this one assignment only
+        if (!map[r.coupon_id]) map[r.coupon_id] = { id: r.id, name: r.profiles?.full_name || 'Unknown', used: r.used }
         ids.add(r.coupon_id)
       })
       return { coupons: c || [], assignments: map, assignedIds: ids, users: u || [] }
@@ -228,7 +230,16 @@ export default function StudioCoupons() {
     if (!form.discount_value) return toast.error('Discount value is required')
     setSaving(true)
     try {
-      const payload = { code: form.code.toUpperCase(), discount_type: form.discount_type, discount_value: parseFloat(form.discount_value), expiry_date: form.expiry_date || null, active: true }
+      const maxUses = form.max_uses === '' || form.max_uses == null ? null : parseInt(form.max_uses)
+      const payload = {
+        code: form.code.toUpperCase(), discount_type: form.discount_type, discount_value: parseFloat(form.discount_value),
+        expiry_date: form.expiry_date || null,
+        // Personal coupons can only be used by the clients they are assigned to
+        is_public: !!form.is_public,
+        max_uses: Number.isFinite(maxUses) && maxUses > 0 ? maxUses : null,
+        // Editing keeps the current on/off state
+        ...(modal === 'add' ? { active: true } : {}),
+      }
       const { error } = modal === 'add'
         ? await supabase.from('coupons').insert(payload)
         : await supabase.from('coupons').update(payload).eq('id', form.id)
@@ -242,8 +253,9 @@ export default function StudioCoupons() {
 
   async function confirmDelete() {
     if (!deleteTarget) return
-    const { error } = await supabase.from('coupons').delete().eq('id', deleteTarget.id)
+    const { data: deleted, error } = await supabase.from('coupons').delete().eq('id', deleteTarget.id).select('id')
     if (error) { toast.error(error.message); return }
+    if (!deleted?.length) { toast.error('Only an admin can delete coupons — switch it off instead'); return }
     setCoupons(prev => prev.filter(c => c.id !== deleteTarget.id))
     toast.success('Coupon deleted')
     log('coupon.deleted', { entityType: 'coupon', entityId: deleteTarget.id, details: { message: `deleted coupon "${deleteTarget.code}"` } })
@@ -259,8 +271,12 @@ export default function StudioCoupons() {
   }
 
   async function unassignCoupon(couponId) {
-    const { error } = await supabase.from('user_coupons').delete().eq('coupon_id', couponId)
+    const assignmentId = assignments[couponId]?.id
+    if (!assignmentId) return
+    const { data: deleted, error } = await supabase.from('user_coupons').delete().eq('id', assignmentId).select('id')
     if (error) { toast.error(error.message); return }
+    if (!deleted?.length) { toast.error('Only an admin can unassign coupons'); return }
+    invalidate('studio_coupons')
     setAssignments(prev => { const next = { ...prev }; delete next[couponId]; return next })
     setAssignedIds(prev => { const next = new Set(prev); next.delete(couponId); return next })
     toast.success('Coupon unassigned')
@@ -270,7 +286,7 @@ export default function StudioCoupons() {
     if (currentActive && assignmentUsed) {
       // Coupon is still globally active but was used by the assigned client.
       // "Mark active" here means: let the client use it again — just reset user_coupons.used.
-      const { error } = await supabase.from('user_coupons').update({ used: false }).eq('coupon_id', id)
+      const { error } = await supabase.from('user_coupons').update({ used: false }).eq('id', assignments[id]?.id)
       if (error) { toast.error(error.message); return }
       setAssignments(prev => prev[id] ? { ...prev, [id]: { ...prev[id], used: false } } : prev)
       invalidate('studio_coupons')
@@ -283,8 +299,8 @@ export default function StudioCoupons() {
     setCoupons(prev => prev.map(c => c.id === id ? { ...c, active: !currentActive } : c))
 
     // Sync user_coupons.used — active=true means used=false, active=false means used=true
-    if (assignedIds.has(id)) {
-      const { error: ucErr } = await supabase.from('user_coupons').update({ used: currentActive }).eq('coupon_id', id)
+    if (assignedIds.has(id) && assignments[id]?.id) {
+      const { error: ucErr } = await supabase.from('user_coupons').update({ used: currentActive }).eq('id', assignments[id].id)
       if (ucErr) toast.error('Coupon status updated but could not sync assignment: ' + ucErr.message)
       else setAssignments(prev => prev[id] ? { ...prev, [id]: { ...prev[id], used: currentActive } } : prev)
     }
@@ -297,10 +313,11 @@ export default function StudioCoupons() {
     if (!assignCoupon || !assignUser) return
     setSaving(true)
     try {
-      const { error } = await supabase.from('user_coupons').upsert({ user_id: assignUser.id, coupon_id: assignCoupon.id, granted_by: 'admin', used: false }, { onConflict: 'user_id,coupon_id' })
+      const { data: uc, error } = await supabase.from('user_coupons').upsert({ user_id: assignUser.id, coupon_id: assignCoupon.id, granted_by: 'admin', used: false }, { onConflict: 'user_id,coupon_id' }).select('id').single()
       if (error) throw error
       setAssignedIds(prev => new Set([...prev, assignCoupon.id]))
-      setAssignments(prev => ({ ...prev, [assignCoupon.id]: { name: assignUser.full_name || 'Unknown', used: false } }))
+      setAssignments(prev => ({ ...prev, [assignCoupon.id]: { id: uc.id, name: assignUser.full_name || 'Unknown', used: false } }))
+      invalidate('studio_coupons')
       toast.success(`Coupon assigned to ${assignUser.full_name || 'client'}`)
       log('coupon.assigned', { entityType: 'coupon', entityId: assignCoupon.id, details: { message: `assigned coupon "${assignCoupon.code}" to ${assignUser.full_name || 'client'}` } })
       setModal(null); setAssignStep(1); setAssignCoupon(null); setAssignUser(null); setUserSearch('')
@@ -423,7 +440,7 @@ export default function StudioCoupons() {
             <CouponCard key={c.id} coupon={c}
               assignment={assignments[c.id] || null}
               isExpired={isExp(c)}
-              onEdit={c => { setForm({ code: c.code, discount_type: c.discount_type, discount_value: c.discount_value?.toString(), expiry_date: c.expiry_date || '', id: c.id }); setModal('edit') }}
+              onEdit={c => { setForm({ code: c.code, discount_type: c.discount_type, discount_value: c.discount_value?.toString(), expiry_date: c.expiry_date || '', is_public: !!c.is_public, max_uses: c.max_uses?.toString() ?? '', id: c.id }); setModal('edit') }}
               onToggle={toggleActive}
               onUnassign={unassignCoupon}
               onAssign={openAssignForCoupon}
@@ -460,19 +477,30 @@ export default function StudioCoupons() {
             <div>
               <label style={lbl}>Value</label>
               <input type="number" value={form.discount_value}
-                onChange={e => setForm(p => ({ ...p, discount_value: Math.min(100, Math.max(0, e.target.value)) }))}
+                onChange={e => setForm(p => ({ ...p, discount_value: p.discount_type === 'percentage' ? Math.min(100, Math.max(0, e.target.value)) : Math.max(0, e.target.value) }))}
                 placeholder={form.discount_type === 'percentage' ? '30' : '15'}
-                min={0} max={100} className="m-inp" style={inp} />
+                min={0} max={form.discount_type === 'percentage' ? 100 : undefined} className="m-inp" style={inp} />
             </div>
             <div>
               <label style={lbl}>Expiry Date <span style={{ textTransform: 'none', letterSpacing: 0, color: C.muted }}>(optional)</span></label>
               <input type="date" value={form.expiry_date} onChange={e => setForm(p => ({ ...p, expiry_date: e.target.value }))} className="m-inp" style={inp} />
             </div>
+            <div>
+              <label style={lbl}>Max uses <span style={{ textTransform: 'none', letterSpacing: 0, color: C.muted }}>(optional, blank = unlimited)</span></label>
+              <input type="number" min={1} value={form.max_uses} onChange={e => setForm(p => ({ ...p, max_uses: e.target.value }))} placeholder="e.g. 50" className="m-inp" style={inp} />
+            </div>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!form.is_public} onChange={e => setForm(p => ({ ...p, is_public: e.target.checked }))} style={{ marginTop: 3 }} />
+              <span style={{ fontSize: '0.9rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', lineHeight: 1.4 }}>
+                Public promo code
+                <span style={{ display: 'block', fontSize: '0.8rem', color: C.muted }}>Anyone with the code can use it. Leave unticked for a coupon you assign to specific clients.</span>
+              </span>
+            </label>
           </div>
           <div style={{ display: 'flex', gap: '0.625rem', marginTop: '1.8rem' }}>
             <button onClick={() => { setModal(null); setForm(EMPTY) }} style={{ flex: 1, padding: '0.6rem', borderRadius: 9, background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, fontSize: '0.96rem', fontFamily: 'DM Sans,sans-serif', cursor: 'pointer' }}>Cancel</button>
             <button onClick={save} disabled={saving} style={{ flex: 1, padding: '0.6rem', borderRadius: 9, background: 'linear-gradient(135deg,var(--col-acc),var(--col-acc2))', color: 'var(--col-bg)', fontSize: '0.96rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: saving ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, opacity: saving ? 0.6 : 1 }}>
-              {saving ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Save size={13} /> {modal === 'add' ? 'Create' : 'Save'}</>}
+              {saving ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Save size={13} /> {modal === 'add' ? 'Create' : 'Save'}</>}
             </button>
           </div>
         </ModalWrap>
@@ -631,7 +659,7 @@ export default function StudioCoupons() {
 
               <button onClick={confirmAssign} disabled={!assignUser || saving}
                 style={{ width: '100%', padding: '0.65rem', borderRadius: 9, background: assignUser ? 'linear-gradient(135deg,var(--col-acc),var(--col-acc2))' : 'rgba(var(--rgb-hi),0.05)', color: assignUser ? 'var(--col-bg)' : C.muted, fontSize: '0.98rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: assignUser && !saving ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all .2s', opacity: saving ? 0.6 : 1 }}>
-                {saving ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><UserPlus size={14} /> Assign Coupon</>}
+                {saving ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><UserPlus size={14} /> Assign Coupon</>}
               </button>
             </>
           )}

@@ -5,5 +5,11 @@ port = 54321
 [functions.create-payment-intent]
 verify_jwt = false
 
+[functions.book-in-store]
+verify_jwt = false
+
+[functions.send-appointment-confirmation]
+verify_jwt = false
+
 [functions.stripe-webhook]
 verify_jwt = false

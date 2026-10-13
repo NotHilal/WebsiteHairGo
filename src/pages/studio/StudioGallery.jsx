@@ -151,7 +151,8 @@ export default function StudioGallery() {
 
   async function deleteGalCat() {
     setCatDeleting(true)
-    const { error } = await supabase.from('gallery_categories').delete().eq('id', catDelId)
+    const { data: deletedCat, error } = await supabase.from('gallery_categories').delete().eq('id', catDelId).select('id')
+    if (!error && !deletedCat?.length) { toast.error('Only an admin can delete categories'); setCatDeleting(false); return }
     setCatDeleting(false)
     if (error) { toast.error(error.message); return }
     toast.success('Category deleted')
@@ -227,7 +228,8 @@ export default function StudioGallery() {
 
   async function confirmDelete() {
     setDeleting(true)
-    const { error } = await supabase.from('gallery').delete().eq('id', deleteTarget.id)
+    const { data: deletedImg, error } = await supabase.from('gallery').delete().eq('id', deleteTarget.id).select('id')
+    if (!error && !deletedImg?.length) { toast.error('Only an admin can delete photos — archive it instead'); setDeleting(false); return }
     if (error) { toast.error(error.message); setDeleting(false); return }
     toast.success('Photo deleted')
     log('gallery.photo_deleted', { entityType: 'gallery', entityId: deleteTarget.id, details: { message: `deleted photo "${deleteTarget.title || 'untitled'}" from gallery` } })
@@ -548,7 +550,7 @@ export default function StudioGallery() {
               <button onClick={save} disabled={saving || (!file && !form.image_url)}
                 style={{ flex: 2, padding: '0.72rem', borderRadius: 12, background: `linear-gradient(135deg,${C.gold},var(--col-acc2))`, color: 'var(--col-bg)', fontSize: '0.82rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: (saving || (!file && !form.image_url)) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: (saving || (!file && !form.image_url)) ? 0.5 : 1, boxShadow: (saving || (!file && !form.image_url)) ? 'none' : '0 4px 20px rgba(var(--rgb-acc),0.28)', transition: 'opacity .2s, box-shadow .2s' }}>
                 {saving
-                  ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                  ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                   : <><Save size={13} /> {modal === 'add' ? 'Add Photo' : 'Save Changes'}</>}
               </button>
             </div>
@@ -645,7 +647,7 @@ export default function StudioGallery() {
                 <button onClick={saveGalCat} disabled={addingCat || !newCatName.trim()}
                   style={{ padding: '0.55rem 1rem', borderRadius: 9, background: newCatName.trim() ? `linear-gradient(135deg,${C.gold},var(--col-acc2))` : 'rgba(var(--rgb-hi),0.06)', color: newCatName.trim() ? 'var(--col-bg)' : C.muted, border: 'none', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, fontSize: '0.8rem', cursor: (addingCat || !newCatName.trim()) ? 'not-allowed' : 'pointer', transition: 'all .2s', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, whiteSpace: 'nowrap' }}>
                   {addingCat
-                    ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,.3)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                    ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,.3)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                     : <><Plus size={12} /> Add</>}
                 </button>
               </div>
@@ -684,7 +686,7 @@ export default function StudioGallery() {
               <div style={{ display: 'flex', gap: '0.625rem' }}>
                 <button onClick={() => setDeleteTarget(null)} style={{ flex: 1, padding: '0.65rem', borderRadius: 10, background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
                 <button onClick={confirmDelete} disabled={deleting} style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,#f87171,#ef4444)', color: 'var(--col-text)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: deleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: deleting ? 0.6 : 1 }}>
-                  {deleting ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopcolor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Trash2 size={13} /> Delete Photo</>}
+                  {deleting ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopColor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Trash2 size={13} /> Delete Photo</>}
                 </button>
               </div>
             </div>

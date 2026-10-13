@@ -1,6 +1,9 @@
 ﻿import { useState, useEffect, useRef } from 'react'
 import { ChevronLeft, ChevronRight, ChevronDown, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { apptFinalPrice } from '../../lib/price'
+import { fetchAll } from '../../lib/fetchAll'
+import toast from 'react-hot-toast'
 import { useAuth } from '../../contexts/AuthContext'
 import {
   format, addMonths, subMonths, startOfMonth, endOfMonth,
@@ -29,7 +32,6 @@ const ALL_STATUSES = ['confirmed', 'completed', 'cancelled']
 const ARTIST_COLORS = ['#a78bfa','#34d399','#f59e0b','#60a5fa','#f87171','#fb923c','#e879f9','#2dd4bf']
 const WDAYS_SHORT  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const WDAYS_SUN    = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const SLOTS        = ['09:00','10:00','11:00','12:00','14:00','15:00','16:00','17:00','18:00']
 
 const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 14 }
 
@@ -151,11 +153,12 @@ export default function StudioSchedule() {
 
   async function load() {
     const [{ data: allAppts }, { data: stylistList }] = await Promise.all([
-      supabase.from('appointments')
+      fetchAll(() => supabase.from('appointments')
         .select('*, profiles(full_name, phone), services(name, price, duration), stylists(name, photo_url)')
         .neq('status', 'cancelled')
         .order('date', { ascending: true })
-        .order('time', { ascending: true }),
+        .order('time', { ascending: true })
+        .order('id')),
       supabase.from('stylists').select('id, name, photo_url').order('display_order'),
     ])
     setAppointments(allAppts || [])
@@ -164,9 +167,8 @@ export default function StudioSchedule() {
   }
 
   async function updateStatus(id, newStatus) {
-    const appt = appointments.find(a => a.id === id)
     const { error } = await supabase.from('appointments').update({ status: newStatus }).eq('id', id)
-    if (error) return
+    if (error) { toast.error(error.message); return }
     setAppointments(prev => prev.map(a => a.id === id ? { ...a, status: newStatus } : a))
     if (selectedAppt?.id === id) setSelectedAppt(prev => ({ ...prev, status: newStatus }))
   }
@@ -588,7 +590,7 @@ export default function StudioSchedule() {
                       )}
                       {appt.services?.price && (
                         <span style={{ fontSize: '0.85rem', color: C.gold, fontFamily: 'DM Sans,sans-serif', fontWeight: 700, flexShrink: 0 }}>
-                          ${appt.services.price}
+                          ${apptFinalPrice(appt).toFixed(2)}
                         </span>
                       )}
                     </div>
@@ -611,7 +613,7 @@ export default function StudioSchedule() {
           { label: 'Phone',    value: a.profiles?.phone || '—' },
           { label: 'Service',  value: a.services?.name || '—' },
           { label: 'Duration', value: a.services?.duration ? `${a.services.duration} min` : '—' },
-          { label: 'Price',    value: a.services?.price ? `$${a.services.price}` : '—', gold: true },
+          { label: 'Price',    value: `$${apptFinalPrice(a).toFixed(2)}`, gold: true },
           { label: 'Stylist',  value: a.stylists?.name || '—' },
           ...(a.payment_status === 'pay_in_store' ? [{ label: 'Payment', value: 'Pay in store', blue: true }] : []),
           ...(a.notes ? [{ label: 'Notes', value: a.notes }] : []),

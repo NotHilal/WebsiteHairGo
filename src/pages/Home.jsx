@@ -69,23 +69,24 @@ export default function Home() {
     }, TTL).then(setTeamMembers)
 
     getOrFetch('home_gallery', async () => {
-      const { data } = await supabase.from('gallery').select('id, image_url').eq('featured', true).order('display_order')
+      const { data } = await supabase.from('gallery').select('id, image_url').eq('featured', true).or('visible.is.null,visible.eq.true').order('display_order')
       if (data?.length) return data
-      const { data: fb } = await supabase.from('gallery').select('id, image_url').order('display_order').limit(5)
+      const { data: fb } = await supabase.from('gallery').select('id, image_url').or('visible.is.null,visible.eq.true').order('display_order').limit(5)
       return fb || []
     }, TTL).then(setGalleryImages)
 
     getOrFetch('home_services', async () => {
-      const { data } = await supabase.from('services').select('id, name, description, price, image_url').eq('featured', true).order('name')
+      const { data } = await supabase.from('services').select('id, name, description, price, image_url').eq('featured', true).eq('active', true).order('name')
       if (data?.length) return data.map(s => ({ ...s, price_display: s.price ? `from $${s.price}` : '' }))
-      const { data: fb } = await supabase.from('services').select('id, name, description, price, image_url').order('name').limit(4)
+      const { data: fb } = await supabase.from('services').select('id, name, description, price, image_url').eq('active', true).order('name').limit(4)
       return (fb || []).map(s => ({ ...s, price_display: s.price ? `from $${s.price}` : '' }))
     }, TTL).then(setHomeServices)
   }, [])
 
-  const displayedTeam     = [...teamMembers,  ...FALLBACK_TEAM.slice(teamMembers.length)].slice(0, 4)
-  const displayedGallery  = [...galleryImages, ...FALLBACK_GALLERY.slice(galleryImages.length)].slice(0, 5)
-  const displayedServices = [...homeServices,  ...FALLBACK_SERVICES.slice(homeServices.length)].slice(0, 4)
+  // Placeholders only show while the salon has nothing of its own yet
+  const displayedTeam     = (teamMembers.length   ? teamMembers   : FALLBACK_TEAM).slice(0, 4)
+  const displayedGallery  = (galleryImages.length ? galleryImages : FALLBACK_GALLERY).slice(0, 5)
+  const displayedServices = (homeServices.length  ? homeServices  : FALLBACK_SERVICES).slice(0, 4)
 
   return (
     <div>

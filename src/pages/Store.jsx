@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plus, Minus, Package, CheckCircle, ShoppingCart, ChevronRight, Star, Store as StoreIcon, MapPin, Lock } from 'lucide-react'
+import { X, Plus, Minus, Package, CheckCircle, ShoppingCart, ChevronRight, MapPin, Lock } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { useCart } from '../contexts/CartContext'
@@ -183,7 +183,7 @@ function ProductCard({ p, inCart, cartItems, onAddToCart, onViewDetail, isGuest 
               onMouseEnter={e => { if (!outOfStock) { e.currentTarget.style.boxShadow = '0 6px 24px rgba(var(--rgb-acc),0.45)'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
               onMouseLeave={e => { e.currentTarget.style.boxShadow = outOfStock ? 'none' : '0 4px 16px rgba(var(--rgb-acc),0.25)'; e.currentTarget.style.transform = 'translateY(0)' }}>
               {adding
-                ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,0.3)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,0.3)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                 : <><ShoppingCart size={12} /><span className="cart-btn-text">Add</span></>
               }
             </button>
@@ -319,7 +319,7 @@ export default function Store() {
           </div>
         ) : (
           <div className="store-grid">
-            {filtered.map((p, i) => (
+            {filtered.map(p => (
               <ProductCard
                 key={p.id}
                 p={p}
@@ -428,7 +428,7 @@ export default function Store() {
                 {user ? (
                   <button onClick={handleAddFromDetail} disabled={dAdding || detail.stock === 0} className="btn-gold" style={{ width: '100%', justifyContent: 'center' }}>
                     {dAdding
-                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,0.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,0.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                       : <><ShoppingCart size={14} /><span className="cart-btn-text">Add to Cart · ${(parseFloat(detail.price) * dQty).toFixed(2)}</span></>
                     }
                   </button>

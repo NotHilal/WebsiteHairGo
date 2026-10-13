@@ -124,7 +124,7 @@ export default function Register() {
 
             <button type="submit" disabled={loading} className="btn-gold" style={{ width: '100%' }}>
               {loading
-                ? <div style={{ width: 15, height: 15, border: '2px solid rgba(0,0,0,0.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                ? <div style={{ width: 15, height: 15, border: '2px solid rgba(0,0,0,0.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
                 : <>Create Account <ArrowRight size={14} /></>
               }
             </button>

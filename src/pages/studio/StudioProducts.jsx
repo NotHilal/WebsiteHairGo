@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Plus, Edit2, Trash2, X, Package, Save, Image, AlertTriangle, EyeOff, ShieldAlert, Search, Tag } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getOrFetch, invalidate } from '../../lib/cache'
@@ -52,10 +52,10 @@ export default function StudioProducts() {
   const [file,          setFile]          = useState(null)
   const [filePreview,   setFilePreview]   = useState('')
   const [search,        setSearch]        = useState('')
-  const [catFilter,     setCatFilter]     = useState('All')
+  const [catFilter]                       = useState('All')
   const [statusFilter,  setStatusFilter]  = useState('all')
-  const [adjusting,     setAdjusting]     = useState(null)
   const stockTimeouts = useRef({})
+  const stockPending  = useRef({})   // unsaved +/- clicks per product
   const [deleteTarget,  setDeleteTarget]  = useState(null)
   const [deleting,      setDeleting]      = useState(false)
 
@@ -97,9 +97,10 @@ export default function StudioProducts() {
 
   async function deleteCategory() {
     setCatDeleting(true)
-    const { error } = await supabase.from('product_categories').delete().eq('id', catDelId)
+    const { data: deleted, error } = await supabase.from('product_categories').delete().eq('id', catDelId).select('id')
     setCatDeleting(false)
     if (error) { toast.error(error.message); return }
+    if (!deleted?.length) { toast.error('Only an admin can delete categories'); return }
     toast.success('Category deleted')
     setCatDelId(null)
     loadCategories()
@@ -110,20 +111,20 @@ export default function StudioProducts() {
     setNewCatName(''); setNewCatColor(COLOR_PRESETS[0])
   }
 
+  // Sends the change (+3, -1…) rather than a number read earlier, so sales
+  // made in the meantime aren't overwritten
   function adjustStock(id, delta) {
-    setProducts(prev => {
-      const cur = prev.find(p => p.id === id)?.stock ?? 0
-      const newStock = Math.max(0, cur + delta)
-      return prev.map(p => p.id === id ? { ...p, stock: newStock } : p)
-    })
+    setProducts(prev => prev.map(p => p.id === id ? { ...p, stock: Math.max(0, (p.stock ?? 0) + delta) } : p))
+    stockPending.current[id] = (stockPending.current[id] || 0) + delta
     clearTimeout(stockTimeouts.current[id])
-    stockTimeouts.current[id] = setTimeout(() => {
-      setProducts(prev => {
-        const latest = prev.find(p => p.id === id)?.stock ?? 0
-        supabase.from('products').update({ stock: latest }).eq('id', id)
-          .then(({ error }) => { if (error) { toast.error(error.message); load() } })
-        return prev
-      })
+    stockTimeouts.current[id] = setTimeout(async () => {
+      const change = stockPending.current[id]
+      stockPending.current[id] = 0
+      if (!change) return
+      const { data: stock, error } = await supabase.rpc('adjust_product_stock', { p_product_id: id, p_delta: change })
+      if (error) { toast.error(error.message); load(); return }
+      setProducts(prev => prev.map(p => p.id === id ? { ...p, stock } : p))
+      invalidate('studio_products')
     }, 700)
   }
 
@@ -135,7 +136,7 @@ export default function StudioProducts() {
 
   function openModal(mode, product = null) {
     setFile(null); setFilePreview('')
-    setForm(product ? { ...product, tags: product.tags || [] } : EMPTY)
+    setForm(product ? { ...product, tags: product.tags || [], _openedStock: product.stock ?? 0 } : EMPTY)
     setModal(mode)
   }
 
@@ -164,11 +165,25 @@ export default function StudioProducts() {
         imageUrl = publicUrl
       }
       const tags = form.tags || []
-      const payload = { ...form, image_url: imageUrl, price: parseFloat(form.price) || 0, stock: parseInt(form.stock) || 0, tags, category: tags[0] || '' }
-      const { error } = modal === 'add'
-        ? await supabase.from('products').insert(payload)
-        : await supabase.from('products').update(payload).eq('id', form.id)
-      if (error) throw error
+      const { stock: formStock, ...fields } = form
+      const newStock = parseInt(formStock) || 0
+      delete fields._openedStock
+      const payload = { ...fields, image_url: imageUrl, price: parseFloat(form.price) || 0, tags, category: tags[0] || '' }
+      if (modal === 'add') {
+        const { error } = await supabase.from('products').insert({ ...payload, stock: newStock })
+        if (error) throw error
+      } else {
+        // Stock is applied as a change from what the form opened with, so
+        // anything sold while the form was open isn't undone
+        const { error } = await supabase.from('products').update(payload).eq('id', form.id)
+        if (error) throw error
+        const opened = products.find(p => p.id === form.id)?.stock ?? 0
+        const change = newStock - (form._openedStock ?? opened)
+        if (change) {
+          const { error: stockErr } = await supabase.rpc('adjust_product_stock', { p_product_id: form.id, p_delta: change })
+          if (stockErr) throw stockErr
+        }
+      }
       toast.success(modal === 'add' ? 'Product added' : 'Product updated')
       log(modal === 'add' ? 'product.created' : 'product.edited', { entityType: 'product', details: { message: `${modal === 'add' ? 'created' : 'edited'} product "${form.name}"` } })
       closeModal(); invalidate('studio_products'); load()
@@ -196,8 +211,9 @@ export default function StudioProducts() {
       // Remove any dangling cart items first
       await supabase.from('cart_items').delete().eq('product_id', deleteTarget.id)
       // Now delete the product
-      const { error } = await supabase.from('products').delete().eq('id', deleteTarget.id)
+      const { data: deleted, error } = await supabase.from('products').delete().eq('id', deleteTarget.id).select('id')
       if (error) throw error
+      if (!deleted?.length) throw new Error('Only an admin can delete products — mark it unavailable instead')
       toast.success('Product deleted')
       log('product.deleted', { entityType: 'product', entityId: deleteTarget.id, details: { message: `deleted product "${deleteTarget.name}"` } })
       setDeleteTarget(null)
@@ -211,7 +227,6 @@ export default function StudioProducts() {
 
   const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }))
 
-  const categories = useMemo(() => ['All', ...new Set(products.map(p => p.category).filter(Boolean))], [products])
   const outOfStock = products.filter(p => (p.stock ?? 0) === 0 && p.available)
   const lowStock   = products.filter(p => (p.stock ?? 0) > 0 && (p.stock ?? 0) < 5)
 
@@ -656,7 +671,7 @@ export default function StudioProducts() {
               <button onClick={save} disabled={saving}
                 style={{ flex: 2, padding: '0.72rem', borderRadius: 12, background: `linear-gradient(135deg,${C.gold},var(--col-acc2))`, color: 'var(--col-bg)', fontSize: '1.07rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: saving ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: saving ? 0.6 : 1, transition: 'opacity .2s, box-shadow .2s', boxShadow: saving ? 'none' : '0 4px 20px rgba(var(--rgb-acc),0.28)' }}>
                 {saving
-                  ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                  ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                   : <><Save size={13} /> {modal === 'add' ? 'Add Product' : 'Save Changes'}</>}
               </button>
             </div>
@@ -747,7 +762,7 @@ export default function StudioProducts() {
                 <button onClick={saveCategory} disabled={addingCat || !newCatName.trim()}
                   style={{ padding: '0.55rem 1rem', borderRadius: 9, background: newCatName.trim() ? `linear-gradient(135deg,${C.gold},var(--col-acc2))` : 'rgba(var(--rgb-hi),0.06)', color: newCatName.trim() ? 'var(--col-bg)' : C.muted, border: 'none', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, fontSize: '1.04rem', cursor: (addingCat || !newCatName.trim()) ? 'not-allowed' : 'pointer', transition: 'all .2s', display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, whiteSpace: 'nowrap' }}>
                   {addingCat
-                    ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,.3)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                    ? <div style={{ width: 13, height: 13, border: '2px solid rgba(0,0,0,.3)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                     : <><Plus size={12} /> Add</>}
                 </button>
               </div>
@@ -785,7 +800,7 @@ export default function StudioProducts() {
               <div style={{ display: 'flex', gap: '0.625rem' }}>
                 <button onClick={() => setDeleteTarget(null)} style={{ flex: 1, padding: '0.65rem', borderRadius: 10, background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, fontSize: '1.04rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, cursor: 'pointer' }}>Cancel</button>
                 <button onClick={confirmDelete} disabled={deleting} style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,#f87171,#ef4444)', color: 'var(--col-text)', fontSize: '1.04rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: deleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: deleting ? 0.6 : 1 }}>
-                  {deleting ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopcolor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Trash2 size={13} /> Delete Product</>}
+                  {deleting ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopColor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} /> : <><Trash2 size={13} /> Delete Product</>}
                 </button>
               </div>
             </div>

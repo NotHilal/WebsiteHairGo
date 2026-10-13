@@ -6,6 +6,8 @@
 // Everything written here comes from the PaymentIntent's metadata, which only
 // create-payment-intent sets — the browser can't mark anything as paid itself.
 
+import { isSlotTaken } from './booking.ts'
+
 export const CURRENCY = 'nzd'
 
 // Stripe metadata values max out at 500 chars, so cart items are split across keys
@@ -81,10 +83,13 @@ async function fulfilAppointment(stripe, admin, pi, md) {
     status:            'confirmed',
     payment_status:    'paid',
     payment_intent_id: pi.id,
+    final_price:       pi.amount / 100,
+    discount_amount:   md.discount_amount ? parseFloat(md.discount_amount) : null,
+    coupon_id:         md.coupon_id || null,
   }).select('id').single()
 
   if (error) {
-    if (error.code === '23505') {
+    if (isSlotTaken(error)) {
       // Someone booked the same slot while this customer was paying
       await stripe.refunds.create({ payment_intent: pi.id })
       return { ok: false, refunded: true, error: 'That time slot was just taken by someone else — your payment has been fully refunded. Please pick another time.' }
@@ -111,16 +116,22 @@ async function fulfilCart(admin, pi, md) {
   const items = unpackItems(md)
   if (!items.length) return { ok: false, error: 'Order has no items' }
 
+  const { data: products } = await admin.from('products').select('id, price')
+    .in('id', items.map(i => i.product_id))
+  const priceOf = Object.fromEntries((products || []).map(p => [p.id, parseFloat(p.price)]))
+
+  // The order discount is stored once, on the first item
   const orderGroupId = crypto.randomUUID()
-  const { error } = await admin.from('preorders').insert(items.map(i => ({
+  const { error } = await admin.from('preorders').insert(items.map((i, n) => ({
     user_id:           md.user_id,
     product_id:        i.product_id,
     quantity:          i.quantity,
+    unit_price:        priceOf[i.product_id] ?? null,
     status:            'active',
     payment_status:    'paid',
     payment_intent_id: pi.id,
     order_group_id:    orderGroupId,
-    ...(md.coupon_code ? { coupon_code: md.coupon_code, discount_amount: parseFloat(md.discount_amount) } : {}),
+    ...(md.coupon_code && n === 0 ? { coupon_code: md.coupon_code, discount_amount: parseFloat(md.discount_amount) } : {}),
   })))
   if (error) throw error
 

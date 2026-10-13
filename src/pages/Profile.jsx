@@ -1,7 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Calendar, Package, Tag, Star, Clock, X, Edit2, Check, LogOut, ShoppingCart, Trash2, Download, Receipt, Scissors, ChevronRight, Minus, Plus, Phone, MessageSquare, Lock, Eye, EyeOff } from 'lucide-react'
-import jsPDF from 'jspdf'
+import { Calendar, Package, Tag, Star, Clock, X, Edit2, Check, LogOut, ShoppingCart, Trash2, Download, Receipt, Scissors, Minus, Plus, Phone, MessageSquare, Lock, Eye, EyeOff } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { useCart } from '../contexts/CartContext'
@@ -11,6 +10,8 @@ import toast from 'react-hot-toast'
 import StripeCheckout from '../components/payment/StripeCheckout'
 import { Copy, CheckCheck } from 'lucide-react'
 import { useLogAction } from '../hooks/useLogAction'
+import { HOURS_LABELS } from '../lib/hours'
+import { apptFinalPrice, linePrice } from '../lib/price'
 
 const TABS = ['Appointments', 'Cart', 'Orders', 'Rewards']
 
@@ -23,11 +24,7 @@ const STATUS_MAP = {
   retrieved: { label: 'Picked Up', color: 'var(--col-acc)', bg: 'rgba(var(--rgb-acc),0.12)'  },
   expired:   { label: 'Expired',   color: 'var(--col-text)', bg: 'rgba(var(--rgb-hi),0.06)' },
 }
-
-function StatusPill({ status }) {
-  const s = STATUS_MAP[status] ?? STATUS_MAP.pending
-  return <span style={{ padding: '4px 10px', borderRadius: 6, fontSize: 15, fontWeight: 500, color: s.color, background: s.bg, whiteSpace: 'nowrap' }}>{s.label}</span>
-}
+const ORDER_CANCELLED = { label: 'Cancelled', color: '#ef4444', bg: 'rgba(239,68,68,0.12)' }
 
 function Countdown({ expiresAt, onExpired }) {
   const [secs, setSecs] = useState(() => Math.max(0, Math.floor((new Date(expiresAt) - Date.now()) / 1000)))
@@ -137,7 +134,6 @@ export default function Profile() {
     setContactSending(true)
     try {
       const appt = contactAppt
-      const stylistName = appt.stylists?.name || 'Any stylist'
       const serviceName = appt.services?.name || 'Service'
       const apptDate = new Date(appt.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
       const apptTime = appt.time?.slice(0, 5) || ''
@@ -171,7 +167,7 @@ export default function Profile() {
       setContactAppt(null)
       setContactMsg('')
       navigate('/chat')
-    } catch (e) {
+    } catch {
       toast.error('Failed to send message')
     } finally {
       setContactSending(false)
@@ -242,7 +238,10 @@ export default function Profile() {
           label: `${cartItems.length} item${cartItems.length !== 1 ? 's' : ''} from HairGo Store`,
         },
       })
-      if (error) throw error
+      if (error) {
+        const body = await error.context?.json?.().catch(() => null)
+        throw new Error(body?.error || 'Could not start payment')
+      }
       setClientSecret(data.client_secret)
       setPayStep('form')
     } catch (err) {
@@ -257,14 +256,17 @@ export default function Profile() {
     try {
       // The server checks stock, creates the reservation and empties the cart
       const { data, error } = await supabase.functions.invoke('create-payment-intent', {
-        body: { type: 'reserve-cart' },
+        body: { type: 'reserve-cart', couponCode: cartCoupon?.code ?? null },
       })
-      if (error || !data?.ok) throw new Error(data?.error)
+      if (error || !data?.ok) {
+        const body = data ?? await error?.context?.json?.().catch(() => null)
+        throw new Error(body?.error || 'Could not reserve items — please try again')
+      }
       await clearCart()
       setCartCoupon(null); setCartCouponCode('')
       const itemSummary = cartItems.map(i => `${i.quantity}× ${i.products?.name || 'item'}`).join(', ')
       log('order.placed', {
-        details: { message: `placed in-store order: ${itemSummary} (pay in store)` },
+        details: { message: `placed in-store order: ${itemSummary}${cartCoupon ? ` (coupon: ${cartCoupon.code})` : ''} (pay in store)` },
       })
       toast.success('Items reserved! Come pay in store within 7 days.')
       loadAll()
@@ -299,7 +301,10 @@ export default function Profile() {
     }
   }
 
-  function downloadReceipt(order) {
+  // jsPDF is large, so it's only downloaded when a receipt is requested
+  async function downloadReceipt(group) {
+    const order = group[0]
+    const { default: jsPDF } = await import('jspdf')
     const doc = new jsPDF({ unit: 'mm', format: 'a4' })
     const W   = 210
     const ml  = 18
@@ -313,12 +318,12 @@ export default function Profile() {
     const line  = [220, 218, 212]
     const fmt   = (n) => `$${Number(n).toFixed(2)}`
 
-    const orderId    = order.id.slice(0, 8).toUpperCase()
+    const orderId    = (order.order_group_id || order.id).slice(0, 8).toUpperCase()
     const orderDate  = format(new Date(order.created_at), 'MMMM d, yyyy')
     const customer   = profile?.full_name || user?.email || 'Customer'
-    const unitPrice  = parseFloat(order.products?.price || 0)
-    const subtotal   = unitPrice * (order.quantity || 1)
-    const discount   = parseFloat(order.discount_amount) || 0
+    const subtotal   = group.reduce((s, o) => s + linePrice(o) * (o.quantity || 1), 0)
+    const discount   = Math.max(0, ...group.map(o => parseFloat(o.discount_amount) || 0))
+    const discountCode = group.find(o => o.coupon_code)?.coupon_code
     const total      = Math.max(0, subtotal - discount)
     const isPaid     = order.payment_status === 'paid'
     const isInStore  = order.payment_status === 'pay_in_store'
@@ -364,14 +369,17 @@ export default function Profile() {
     doc.text('ITEM', ml, y); doc.text('QTY', W / 2, y, { align: 'center' }); doc.text('PRICE', W - mr, y, { align: 'right' }); doc.setCharSpace(0)
     y += 4; doc.setDrawColor(...line); doc.setLineWidth(0.3); doc.line(ml, y, W - mr, y); y += 6
 
-    // Item row
-    doc.setFillColor(244, 243, 240); doc.rect(ml - 2, y - 4, W - ml - mr + 4, 8, 'F')
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...navy)
-    doc.text(order.products?.name || 'Product', ml, y)
-    doc.setTextColor(...ink); doc.text(String(order.quantity || 1), W / 2, y, { align: 'center' })
-    doc.setFont('helvetica', 'bold'); doc.setTextColor(...steel)
-    doc.text(fmt(subtotal), W - mr, y, { align: 'right' })
-    y += 12
+    // Item rows
+    group.forEach((o, i) => {
+      if (i % 2 === 0) { doc.setFillColor(244, 243, 240); doc.rect(ml - 2, y - 4, W - ml - mr + 4, 8, 'F') }
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...navy)
+      doc.text(o.products?.name || 'Product', ml, y)
+      doc.setTextColor(...ink); doc.text(String(o.quantity || 1), W / 2, y, { align: 'center' })
+      doc.setFont('helvetica', 'bold'); doc.setTextColor(...steel)
+      doc.text(fmt(linePrice(o) * (o.quantity || 1)), W - mr, y, { align: 'right' })
+      y += 9
+    })
+    y += 3
 
     // Totals
     doc.setDrawColor(...line); doc.setLineWidth(0.3); doc.line(ml, y, W - mr, y); y += 7
@@ -380,7 +388,7 @@ export default function Profile() {
     doc.text('Subtotal', totalsL, y); doc.text(fmt(subtotal), W - mr, y, { align: 'right' }); y += 7
     if (discount > 0) {
       doc.setTextColor(34, 160, 100)
-      doc.text(`Discount (${order.coupon_code})`, totalsL, y)
+      doc.text(`Discount (${discountCode || 'coupon'})`, totalsL, y)
       doc.text(`-${fmt(discount)}`, W - mr, y, { align: 'right' }); y += 7
     }
     doc.setDrawColor(...steel); doc.setLineWidth(0.4); doc.line(totalsL, y, W - mr, y); y += 6
@@ -420,7 +428,8 @@ export default function Profile() {
     doc.save(`HairGo-Receipt-${orderId}.pdf`)
   }
 
-  function downloadApptReceipt(appt) {
+  async function downloadApptReceipt(appt) {
+    const { default: jsPDF } = await import('jspdf')
     const doc = new jsPDF({ unit: 'mm', format: 'a4' })
     const W   = 210
     const ml  = 18
@@ -441,10 +450,10 @@ export default function Profile() {
     const timeStr      = appt.time ? appt.time.slice(0, 5) : ''
     const customer     = profile?.full_name || user?.email || 'Customer'
     const price        = parseFloat(appt.services?.price || 0)
-    const couponMatch  = appt.notes?.match(/\[Coupon: (\S+) — .+? · Final: \$([0-9.]+)\]/)
-    const couponCode   = couponMatch?.[1] || null
-    const finalPrice   = couponMatch ? parseFloat(couponMatch[2]) : price
-    const discount     = couponMatch ? price - parseFloat(couponMatch[2]) : 0
+    const couponMatch  = appt.notes?.match(/\[Coupon: (\S+) — /)
+    const couponCode   = couponMatch?.[1] || 'coupon'
+    const finalPrice   = apptFinalPrice(appt)
+    const discount     = Math.max(0, price - finalPrice)
     const isPaid       = appt.payment_status === 'paid'
     const fmt          = (n) => `$${Number(n).toFixed(2)}`
 
@@ -742,7 +751,7 @@ export default function Profile() {
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             <button onClick={startCartPayment} disabled={payStep === 'loading' || reserving} className="btn-gold" style={{ padding: '10px 22px', fontSize: 15, justifyContent: 'center', borderRadius: 10 }}>
                               {payStep === 'loading'
-                                ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,0.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                                ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,0.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
                                 : 'Pay Online'
                               }
                             </button>
@@ -809,7 +818,8 @@ export default function Profile() {
                         const apptDate = format(new Date(appt.date), 'MMM d, yyyy')
                         const isUpcoming = appt.status === 'confirmed' || appt.status === 'pending'
                         const couponMatch = appt.notes?.match(/\[Coupon: (\S+) — (.+?) · Final: \$([0-9.]+)\]/)
-                        const discountedPrice = couponMatch ? couponMatch[3] : null
+                        const paid = apptFinalPrice(appt)
+                        const discountedPrice = paid < parseFloat(appt.services?.price || 0) ? paid.toFixed(2) : null
                         return (
                           <div key={appt.id} style={{ borderRadius: 16, border: `1px solid ${isUpcoming ? 'rgba(var(--rgb-acc),0.28)' : BD}`, overflow: 'hidden', background: 'var(--col-bg)', boxShadow: isUpcoming ? '0 4px 24px rgba(var(--rgb-acc),0.08)' : 'none', display: 'flex', transition: 'box-shadow 0.2s' }}>
 
@@ -928,17 +938,17 @@ export default function Profile() {
                   ).sort((a, b) => new Date(b[0].created_at) - new Date(a[0].created_at))
 
                   const filteredGroups = allGroups.filter(g =>
-                    ordFilter === 'pickup' ? g[0].status === 'active' : (g[0].status === 'retrieved' || g[0].status === 'expired')
+                    ordFilter === 'pickup' ? g[0].status === 'active' : g[0].status !== 'active'
                   )
                   const pageGroups = filteredGroups.slice(ordPage * PER_PAGE, (ordPage + 1) * PER_PAGE)
                   const ordCounts = {
                     pickup:    allGroups.filter(g => g[0].status === 'active').length,
-                    completed: allGroups.filter(g => g[0].status === 'retrieved' || g[0].status === 'expired').length,
+                    completed: allGroups.filter(g => g[0].status !== 'active').length,
                   }
                   return (
                   <div style={{ display: 'flex', flexDirection: 'column' }}>
                     <div style={{ display: 'flex', gap: 6, padding: '10px 16px', borderBottom: `1px solid ${BD}`, flexWrap: 'wrap' }}>
-                      {[['pickup','Awaiting Pickup'],['completed','Completed']].map(([key, label]) => (
+                      {[['pickup','Awaiting Pickup'],['completed','Past orders']].map(([key, label]) => (
                         <button key={key} onClick={() => { setOrdFilter(key); setOrdPage(0) }}
                           style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 14px', borderRadius:20, fontSize:15, letterSpacing:'0.1em', textTransform:'uppercase', fontFamily:'DM Sans,sans-serif', fontWeight: ordFilter===key ? 600 : 400, cursor:'pointer', border:`1px solid ${ordFilter===key ? 'rgba(var(--rgb-acc),0.4)' : BD}`, background: ordFilter===key ? 'rgba(var(--rgb-acc),0.1)' : 'transparent', color: ordFilter===key ? 'var(--col-acc)' : 'var(--col-text)', transition:'all 0.15s' }}>
                           {label}
@@ -953,15 +963,16 @@ export default function Profile() {
                       ))
                     ) : pageGroups.length === 0 ? (
                       <EmptyState icon={Package}
-                        text={ordFilter === 'pickup' ? 'No orders awaiting pickup.' : 'No completed orders yet.'}
+                        text={ordFilter === 'pickup' ? 'No orders awaiting pickup.' : 'No past orders yet.'}
                         action={ordFilter === 'pickup' ? 'Browse the store' : undefined}
                         link={ordFilter === 'pickup' ? '/store' : undefined} />
                     ) : (
                       pageGroups.map(group => {
                         const first = group[0]
-                        const s = STATUS_MAP[first.status] ?? STATUS_MAP.active
-                        const groupTotal = group.reduce((sum, o) => sum + (parseFloat(o.products?.price) || 0) * o.quantity, 0)
-                        const groupDiscount = parseFloat(first.discount_amount) || 0
+                        const s = first.status === 'cancelled' ? ORDER_CANCELLED : (STATUS_MAP[first.status] ?? STATUS_MAP.active)
+                        const groupTotal = group.reduce((sum, o) => sum + linePrice(o) * o.quantity, 0)
+                        const groupDiscount = Math.max(0, ...group.map(o => parseFloat(o.discount_amount) || 0))
+                        const groupCoupon = group.find(o => o.coupon_code)?.coupon_code
                         const groupPaid = groupDiscount > 0 ? Math.max(0, groupTotal - groupDiscount) : groupTotal
                         const groupId = (first.order_group_id || first.id).slice(0, 8).toUpperCase()
                         return (
@@ -982,7 +993,7 @@ export default function Profile() {
 
                             {/* Items */}
                             {group.map((order, i) => {
-                              const itemTotal = ((parseFloat(order.products?.price) || 0) * order.quantity)
+                              const itemTotal = linePrice(order) * order.quantity
                               const isSingleWithDiscount = group.length === 1 && groupDiscount > 0
                               return (
                               <div key={order.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: i < group.length - 1 ? `1px solid ${BD}` : 'none' }}>
@@ -996,7 +1007,7 @@ export default function Profile() {
                                     {order.products?.name}
                                   </p>
                                   <p style={{ color: 'var(--col-text)', fontSize: 15, fontFamily: 'DM Sans,sans-serif', opacity: 0.5 }}>
-                                    Qty {order.quantity}{order.products?.price ? ` · $${parseFloat(order.products.price).toFixed(2)} each` : ''}
+                                    Qty {order.quantity}{linePrice(order) ? ` · $${linePrice(order).toFixed(2)} each` : ''}
                                   </p>
                                 </div>
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1, flexShrink: 0 }}>
@@ -1019,12 +1030,12 @@ export default function Profile() {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                                   <div style={{ width: 6, height: 6, borderRadius: '50%', background: first.payment_status === 'paid' ? '#34d399' : '#f59e0b', flexShrink: 0 }} />
                                   <span style={{ fontSize: 14, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', letterSpacing: '0.08em' }}>
-                                    {first.payment_status === 'paid' ? 'Paid via Stripe' : first.payment_status === 'pay_in_store' ? 'Pay in store' : 'Payment pending'}
+                                    {first.payment_status === 'paid' ? 'Paid via Stripe' : first.payment_status === 'refunded' ? 'Refunded' : first.payment_status === 'pay_in_store' ? 'Pay in store' : 'Payment pending'}
                                   </span>
                                 </div>
-                                {first.coupon_code && groupDiscount > 0 && (
+                                {groupCoupon && groupDiscount > 0 && (
                                   <span style={{ fontSize: 13, color: '#34d399', fontFamily: 'DM Sans,sans-serif', paddingLeft: 11 }}>
-                                    {first.coupon_code} — ${groupDiscount.toFixed(2)} off
+                                    {groupCoupon} — ${groupDiscount.toFixed(2)} off
                                   </span>
                                 )}
                                 {first.payment_status === 'pay_in_store' && first.expires_at && first.status === 'active' && (
@@ -1046,7 +1057,7 @@ export default function Profile() {
                                     </span>
                                   </div>
                                 )}
-                                <button onClick={() => setReceipt(first)}
+                                <button onClick={() => setReceipt(group)}
                                   style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 8, background: 'var(--col-acc)', border: '1px solid rgba(var(--rgb-acc),0.18)', color: 'var(--col-bg)', fontSize: 14, letterSpacing: '0.12em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s' }}>
                                   <Receipt size={10} /> Receipt
                                 </button>
@@ -1223,11 +1234,11 @@ export default function Profile() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
                   <div>
                     <p style={{ fontSize: 15, color: 'var(--col-text)', letterSpacing: '0.18em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif', marginBottom: 4 }}>Order</p>
-                    <p style={{ fontFamily: 'monospace', fontSize: 14, color: 'var(--col-text)', letterSpacing: '0.1em' }}>#{receipt.id.slice(0, 8).toUpperCase()}</p>
+                    <p style={{ fontFamily: 'monospace', fontSize: 14, color: 'var(--col-text)', letterSpacing: '0.1em' }}>#{(receipt[0].order_group_id || receipt[0].id).slice(0, 8).toUpperCase()}</p>
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <p style={{ fontSize: 15, color: 'var(--col-text)', letterSpacing: '0.18em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif', marginBottom: 4 }}>Date</p>
-                    <p style={{ fontSize: 14, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>{format(new Date(receipt.created_at), 'MMM d, yyyy')}</p>
+                    <p style={{ fontSize: 14, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>{format(new Date(receipt[0].created_at), 'MMM d, yyyy')}</p>
                   </div>
                 </div>
 
@@ -1243,42 +1254,51 @@ export default function Profile() {
                   <span style={{ fontSize: 15, color: 'var(--col-text)', letterSpacing: '0.18em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif' }}>Amount</span>
                 </div>
 
-                {/* Item row */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '12px 0', borderTop: '1px solid rgba(var(--rgb-hi),0.06)', borderBottom: '1px solid rgba(var(--rgb-hi),0.06)', marginBottom: 14 }}>
-                  <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
-                    <p style={{ fontSize: 15, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 500, marginBottom: 3 }}>{receipt.products?.name}</p>
-                    <p style={{ fontSize: 15, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>
-                      {receipt.quantity} × ${parseFloat(receipt.products?.price || 0).toFixed(2)}
-                    </p>
-                  </div>
-                  <span style={{ fontSize: 14, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>
-                    ${((parseFloat(receipt.products?.price) || 0) * receipt.quantity).toFixed(2)}
-                  </span>
-                </div>
+                {/* Item rows */}
+                {(() => {
+                  const subtotal = receipt.reduce((sum, o) => sum + linePrice(o) * o.quantity, 0)
+                  const discount = Math.max(0, ...receipt.map(o => parseFloat(o.discount_amount) || 0))
+                  const code     = receipt.find(o => o.coupon_code)?.coupon_code
+                  return (
+                    <>
+                      <div style={{ borderTop: '1px solid rgba(var(--rgb-hi),0.06)', borderBottom: '1px solid rgba(var(--rgb-hi),0.06)', marginBottom: 14 }}>
+                        {receipt.map(o => (
+                          <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '10px 0' }}>
+                            <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
+                              <p style={{ fontSize: 15, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 500, marginBottom: 3 }}>{o.products?.name}</p>
+                              <p style={{ fontSize: 15, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>
+                                {o.quantity} × ${linePrice(o).toFixed(2)}
+                              </p>
+                            </div>
+                            <span style={{ fontSize: 14, color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, flexShrink: 0 }}>
+                              ${(linePrice(o) * o.quantity).toFixed(2)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
 
-                {/* Discount row */}
-                {receipt.coupon_code && parseFloat(receipt.discount_amount) > 0 && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <span style={{ fontSize: 13, fontFamily: 'DM Sans,sans-serif', color: '#34d399' }}>{receipt.coupon_code} — discount</span>
-                    <span style={{ fontSize: 13, fontFamily: 'DM Sans,sans-serif', color: '#34d399', fontWeight: 600 }}>−${parseFloat(receipt.discount_amount).toFixed(2)}</span>
-                  </div>
-                )}
+                      {discount > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <span style={{ fontSize: 13, fontFamily: 'DM Sans,sans-serif', color: '#34d399' }}>{code || 'Coupon'} — discount</span>
+                          <span style={{ fontSize: 13, fontFamily: 'DM Sans,sans-serif', color: '#34d399', fontWeight: 600 }}>−${discount.toFixed(2)}</span>
+                        </div>
+                      )}
 
-                {/* Total */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-                  <span style={{ fontSize: 14, letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif', color: 'var(--col-text)', fontWeight: 600 }}>Total</span>
-                  <span className="font-display gold-gradient" style={{ fontSize: '1.6rem', lineHeight: 1 }}>
-                    {receipt.coupon_code && parseFloat(receipt.discount_amount) > 0
-                      ? `$${Math.max(0, ((parseFloat(receipt.products?.price) || 0) * receipt.quantity) - parseFloat(receipt.discount_amount)).toFixed(2)}`
-                      : `$${((parseFloat(receipt.products?.price) || 0) * receipt.quantity).toFixed(2)}`}
-                  </span>
-                </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+                        <span style={{ fontSize: 14, letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: 'DM Sans,sans-serif', color: 'var(--col-text)', fontWeight: 600 }}>Total</span>
+                        <span className="font-display gold-gradient" style={{ fontSize: '1.6rem', lineHeight: 1 }}>
+                          ${Math.max(0, subtotal - discount).toFixed(2)}
+                        </span>
+                      </div>
+                    </>
+                  )
+                })()}
 
                 {/* Payment badge */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, padding: '10px 14px', background: receipt.payment_status === 'paid' ? 'rgba(52,211,153,0.08)' : 'rgba(245,158,11,0.08)', borderRadius: 10, border: `1px solid ${receipt.payment_status === 'paid' ? 'rgba(52,211,153,0.2)' : 'rgba(245,158,11,0.2)'}`, marginBottom: 22 }}>
-                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: receipt.payment_status === 'paid' ? '#34d399' : '#f59e0b', flexShrink: 0 }} />
-                  <span style={{ fontSize: 15, fontFamily: 'DM Sans,sans-serif', color: receipt.payment_status === 'paid' ? '#34d399' : '#f59e0b', fontWeight: 600, letterSpacing: '0.1em' }}>
-                    {receipt.payment_status === 'paid' ? 'Paid via Stripe' : receipt.payment_status === 'pay_in_store' ? 'Pay in store' : 'Payment pending'}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, padding: '10px 14px', background: receipt[0].payment_status === 'paid' ? 'rgba(52,211,153,0.08)' : 'rgba(245,158,11,0.08)', borderRadius: 10, border: `1px solid ${receipt[0].payment_status === 'paid' ? 'rgba(52,211,153,0.2)' : 'rgba(245,158,11,0.2)'}`, marginBottom: 22 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: receipt[0].payment_status === 'paid' ? '#34d399' : '#f59e0b', flexShrink: 0 }} />
+                  <span style={{ fontSize: 15, fontFamily: 'DM Sans,sans-serif', color: receipt[0].payment_status === 'paid' ? '#34d399' : '#f59e0b', fontWeight: 600, letterSpacing: '0.1em' }}>
+                    {receipt[0].payment_status === 'paid' ? 'Paid via Stripe' : receipt[0].payment_status === 'refunded' ? 'Refunded' : receipt[0].payment_status === 'pay_in_store' ? 'Pay in store' : 'Payment pending'}
                   </span>
                 </div>
 
@@ -1378,7 +1398,7 @@ export default function Profile() {
                     </a>
 
                     <div style={{ width: '100%', borderRadius: 12, background: 'rgba(var(--rgb-hi),0.03)', border: `1px solid ${BD}`, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {[['Mon – Fri', '9:00 – 19:00'], ['Sat – Sun', '10:00 – 18:00']].map(([day, time]) => (
+                      {HOURS_LABELS.map(({ day, time }) => (
                         <div key={day} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           <span style={{ fontSize: 12, fontFamily: 'DM Sans,sans-serif', color: 'var(--col-text)', opacity: 0.45 }}>{day}</span>
                           <span style={{ fontSize: 12, fontFamily: 'DM Sans,sans-serif', color: 'var(--col-acc)', fontWeight: 500 }}>{time}</span>

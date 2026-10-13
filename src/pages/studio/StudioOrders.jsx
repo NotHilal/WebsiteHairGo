@@ -4,6 +4,8 @@ import { useLogAction } from '../../hooks/useLogAction'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Search, Package, Check, X, Trash2, AlertTriangle, ChevronRight, RotateCcw } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { linePrice } from '../../lib/price'
+import { fetchAll } from '../../lib/fetchAll'
 import { getOrFetch, invalidate } from '../../lib/cache'
 import Pager from '../../lib/Pager'
 import { format } from 'date-fns'
@@ -42,10 +44,11 @@ export default function StudioOrders() {
   async function load() {
     setLoading(true)
     const data = await getOrFetch('studio_orders', async () => {
-      const { data, error } = await supabase
+      const { data, error } = await fetchAll(() => supabase
         .from('preorders')
         .select('*, products(name, price, image_url, category), profiles(full_name, phone)')
         .order('created_at', { ascending: false })
+        .order('id'))
       if (error) toast.error('Failed to load orders')
       return data || []
     }, 60_000)
@@ -104,18 +107,15 @@ export default function StudioOrders() {
     const { data, error } = await supabase.functions.invoke('process-refund', {
       body: { type: 'order', id: group.groupId },
     })
-    if (error) { toast.error('Failed to cancel: ' + (error.message || 'unknown error')); setUpdating(null); return }
+    if (error) {
+      const body = await error.context?.json?.().catch(() => null)
+      toast.error('Failed to cancel: ' + (body?.error || error.message || 'unknown error')); setUpdating(null); return
+    }
 
     log('order.cancelled', { entityType: 'order', entityId: group.groupId, details: { message: `cancelled ${group.profiles?.full_name || 'client'}'s order${data?.refunded ? ' — Stripe refund issued' : ''}` } })
 
-    // Restock items
-    for (const item of group.items) {
-      if (item.product_id && item.quantity) {
-        const { data: prod } = await supabase.from('products').select('stock').eq('id', item.product_id).single()
-        if (prod) await supabase.from('products').update({ stock: (prod.stock || 0) + item.quantity }).eq('id', item.product_id)
-      }
-    }
-
+    // Items still awaiting pickup are put back in stock by the server
+    invalidate('studio_orders')
     toast.success(data?.refunded ? 'Order cancelled & refund issued' : 'Order cancelled')
     syncGroup(group.groupId, { status: 'cancelled', ...(data?.refunded ? { payment_status: 'refunded' } : {}) })
     setUpdating(null)
@@ -133,13 +133,19 @@ export default function StudioOrders() {
     setUpdating(null)
   }
 
-  function openDelete(group) { setDeleteTarget(group) }
+  function openDelete(group) {
+    // Deleting would leave reserved stock off the shelf — cancel first
+    if (group.status === 'active') return toast.error('Cancel this order first — that returns its items to stock')
+    setDeleteTarget(group)
+  }
   function closeDelete() { setDeleteTarget(null) }
 
   async function confirmDelete() {
     const ids = deleteTarget.items.map(i => i.id)
-    const { error } = await supabase.from('preorders').delete().in('id', ids)
+    const { data: deleted, error } = await supabase.from('preorders').delete().in('id', ids).select('id')
     if (error) { toast.error('Delete failed'); return }
+    if (!deleted?.length) { toast.error('Only an admin can delete orders'); return }
+    invalidate('studio_orders')
     toast.success('Order deleted')
     log('order.deleted', { entityType: 'order', entityId: deleteTarget.groupId, details: { message: `deleted order from ${deleteTarget.profiles?.full_name || 'client'}` } })
     setOrders(prev => prev.filter(o => !ids.includes(o.id)))
@@ -232,7 +238,7 @@ export default function StudioOrders() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {paged.map((group) => {
                 const s = STATUS_STYLE[group.status] || STATUS_STYLE.active
-                const total = group.items.reduce((sum, o) => sum + (parseFloat(o.products?.price) || 0) * (o.quantity || 1), 0)
+                const total = group.items.reduce((sum, o) => sum + linePrice(o) * (o.quantity || 1), 0)
 
                 return (
                   <div key={group.groupId} className="o-row"
@@ -286,7 +292,7 @@ export default function StudioOrders() {
       <AnimatePresence>
         {details && (() => {
           const s = STATUS_STYLE[details.status] || STATUS_STYLE.active
-          const total = details.items.reduce((sum, o) => sum + (parseFloat(o.products?.price) || 0) * (o.quantity || 1), 0)
+          const total = details.items.reduce((sum, o) => sum + linePrice(o) * (o.quantity || 1), 0)
           return (
             <motion.div key="order-details" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}
@@ -323,7 +329,7 @@ export default function StudioOrders() {
                   {/* Product list */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
                     {details.items.map((item) => {
-                      const itemTotal = (parseFloat(item.products?.price) || 0) * (item.quantity || 1)
+                      const itemTotal = linePrice(item) * (item.quantity || 1)
                       return (
                         <div key={item.id} style={{ display: 'flex', gap: '0.875rem', padding: '0.875rem', background: 'rgba(var(--rgb-hi),0.03)', border: `1px solid ${C.border}`, borderRadius: 12 }}>
                           <div style={{ width: 56, height: 56, borderRadius: 10, background: 'var(--col-card)', border: `1px solid ${C.border}`, overflow: 'hidden', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -343,9 +349,9 @@ export default function StudioOrders() {
                             )}
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                               <span style={{ fontSize: '0.78rem', color: C.muted, fontFamily: 'DM Sans,sans-serif' }}>×{item.quantity || 1}</span>
-                              {item.products?.price && <>
+                              {linePrice(item) > 0 && <>
                                 <span style={{ width: 1, height: 10, background: C.border }} />
-                                <span style={{ fontSize: '0.7rem', color: C.muted, fontFamily: 'DM Sans,sans-serif' }}>@ ${parseFloat(item.products.price).toFixed(2)} each</span>
+                                <span style={{ fontSize: '0.7rem', color: C.muted, fontFamily: 'DM Sans,sans-serif' }}>@ ${linePrice(item).toFixed(2)} each</span>
                               </>}
                             </div>
                           </div>
@@ -476,7 +482,7 @@ export default function StudioOrders() {
                     {deleteTarget.items.map(i => i.products?.name || '?').join(', ')}
                   </p>
                   <p style={{ color: C.muted, fontSize: '0.75rem', fontFamily: 'DM Sans,sans-serif' }}>
-                    {deleteTarget.profiles?.full_name} · {deleteTarget.items.length} item{deleteTarget.items.length !== 1 ? 's' : ''} · ${deleteTarget.items.reduce((sum, o) => sum + (parseFloat(o.products?.price) || 0) * (o.quantity || 1), 0).toFixed(2)}
+                    {deleteTarget.profiles?.full_name} · {deleteTarget.items.length} item{deleteTarget.items.length !== 1 ? 's' : ''} · ${deleteTarget.items.reduce((sum, o) => sum + linePrice(o) * (o.quantity || 1), 0).toFixed(2)}
                   </p>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>

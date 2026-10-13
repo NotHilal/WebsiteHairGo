@@ -1,16 +1,22 @@
-# React + Vite
+# HairGo
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Website and staff studio for HairGo, a hair salon in Auckland.
 
-Currently, two official plugins are available:
+- **Customers:** book appointments (pay online or in store, guests welcome),
+  buy products for pickup, loyalty rewards, messages with the team.
+- **Studio (`/studio`):** schedule, appointments, days off, timesheets and pay
+  runs, sales, store orders, coupons, gallery and site content. Roles: admin,
+  manager, artist.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Built with React + Vite + Tailwind, Supabase (database, auth, edge functions),
+Stripe and Resend.
 
-## React Compiler
+```bash
+npm install
+npm run dev     # local development
+npm run build   # production build in dist/
+npm run lint
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
- 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Setup, deployment and how the main features work: see [SETUP.md](SETUP.md).
+Stripe: see [STRIPE_SETUP.md](STRIPE_SETUP.md).

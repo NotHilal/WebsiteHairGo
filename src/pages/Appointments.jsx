@@ -11,6 +11,7 @@ import {
 } from 'date-fns'
 import toast from 'react-hot-toast'
 import StripeCheckout from '../components/payment/StripeCheckout'
+import { slotsForDay } from '../lib/hours'
 
 function fmtDur(min) {
   const h = Math.floor(min / 60), m = min % 60
@@ -32,7 +33,6 @@ function slotOverlapsBlocked(slot, durationMins, blockedSlots) {
 }
 
 const STEPS = ['Service', 'Stylist', 'Date & Time', 'Confirm']
-const SLOTS = ['09:00','10:00','11:00','12:00','14:00','15:00','16:00','17:00','18:00','19:00','20:00','21:00']
 const SERVICES_PER_PAGE = 4
 
 const slide = {
@@ -79,8 +79,8 @@ export default function Appointments() {
   useEffect(() => {
     const TTL = 5 * 60_000
     Promise.all([
-      getOrFetch('services_all', async () => {
-        const { data } = await supabase.from('services').select('*').order('category')
+      getOrFetch('services_active', async () => {
+        const { data } = await supabase.from('services').select('*').eq('active', true).order('category')
         return data || []
       }, TTL),
       getOrFetch('stylists_artists', async () => {
@@ -115,22 +115,23 @@ export default function Appointments() {
   useEffect(() => {
     if (!sel.date || !sel.stylist) return
     const dateStr = format(sel.date, 'yyyy-MM-dd')
-    if (stylistDayOffs.includes(dateStr)) { setTaken([...SLOTS]); setBlockedSlots([]); return }
-    const apptQuery = supabase.from('appointments').select('time, services(duration)').eq('stylist_id', sel.stylist.id).eq('date', dateStr).neq('status', 'cancelled')
+    const daySlots = slotsForDay(sel.date, sel.service?.duration || 60)
+    if (stylistDayOffs.includes(dateStr)) { setTaken([...daySlots]); setBlockedSlots([]); return }
+    // Busy times come from a server function: customers can't read other people's bookings
     Promise.all([
-      apptQuery,
+      supabase.rpc('get_busy_slots', { p_stylist_id: sel.stylist.id, p_date: dateStr }),
       supabase.from('blocked_hours').select('hour').eq('date', dateStr).or(`stylist_id.eq.${sel.stylist.id},stylist_id.is.null`),
     ]).then(([{ data: appts }, { data: hours }]) => {
       const selectedDur = sel.service?.duration || 60
       const takenSet = new Set()
 
       for (const appt of (appts || [])) {
-        const [h, m] = appt.time.slice(0, 5).split(':').map(Number)
+        const [h, m] = appt.start_time.slice(0, 5).split(':').map(Number)
         const apptStart = h * 60 + m
-        const apptDur = appt.services?.duration || 60
+        const apptDur = appt.duration_minutes || 60
         const apptEnd = apptStart + apptDur
 
-        for (const slot of SLOTS) {
+        for (const slot of daySlots) {
           const [sh, sm] = slot.split(':').map(Number)
           const slotMin = sh * 60 + sm
           const slotEnd = slotMin + selectedDur
@@ -205,16 +206,21 @@ export default function Appointments() {
       ? Math.max(0, basePrice * (1 - appliedCoupon.coupons.discount_value / 100))
       : Math.max(0, basePrice - appliedCoupon.coupons.discount_value)
     : basePrice
+  // Online payment needs an account, and Stripe can't charge under $0.50
+  const canPayOnline = !!user && finalPrice >= 0.5
 
+  // Pay-in-store bookings are logged by the book-in-store function (which
+  // also covers guests); this is only for online payments, which need an account.
   async function logBooking(paymentStatus) {
+    if (!user) return
     try {
       await supabase.from('activity_logs').insert({
-        actor_id:   user?.id   || null,
-        actor_name: user ? (profile?.full_name || user.email) : guestInfo.name,
-        actor_role: user ? (profile?.role || 'user') : 'guest',
+        actor_id:   user.id,
+        actor_name: profile?.full_name || user.email,
+        actor_role: profile?.role || 'user',
         action:     'appointment.booked',
         details: {
-          message: `${user ? (profile?.full_name || 'Client') : guestInfo.name} booked ${sel.service.name} with ${sel.stylist.name} on ${format(sel.date, 'MMM d')} at ${sel.time}${paymentStatus === 'pay_in_store' ? ' · Pay in store' : ' · Paid online'}`,
+          message: `${profile?.full_name || 'Client'} booked ${sel.service.name} with ${sel.stylist.name} on ${format(sel.date, 'MMM d')} at ${sel.time} · Paid online`,
           service:        sel.service.name,
           stylist:        sel.stylist.name,
           date:           format(sel.date, 'yyyy-MM-dd'),
@@ -294,7 +300,10 @@ export default function Appointments() {
           label: `${sel.service.name} with ${sel.stylist.name} — ${format(sel.date, 'MMM d')} at ${sel.time}`,
         },
       })
-      if (error) throw error
+      if (error) {
+        const body = await error.context?.json?.().catch(() => null)
+        throw new Error(body?.error || 'Could not start payment')
+      }
       setClientSecret(data.client_secret)
       setPayStep('form')
     } catch (err) {
@@ -334,31 +343,24 @@ export default function Appointments() {
     if (!guestInfoValid) return toast.error('Please fill in your contact information')
     setSaving(true)
     try {
-      const couponNote = appliedCoupon
-        ? `[Coupon: ${appliedCoupon.coupons.code} — ${appliedCoupon.coupons.discount_type === 'percentage' ? `${appliedCoupon.coupons.discount_value}% off` : `$${appliedCoupon.coupons.discount_value} off`} · Final: $${finalPrice.toFixed(2)}]`
-        : ''
-      const row = {
-        stylist_id: sel.stylist.id, service_id: sel.service.id,
-        date: format(sel.date, 'yyyy-MM-dd'), time: sel.time,
-        notes: [sel.notes, couponNote].filter(Boolean).join('\n'),
-        status: 'confirmed', payment_status: 'pay_in_store',
-        // Generated here so guests (who can't read rows back) can still get an email
-        id: crypto.randomUUID(),
+      // The server checks the slot and works out the price and coupon
+      const { data, error } = await supabase.functions.invoke('book-in-store', {
+        body: {
+          serviceId: sel.service.id,
+          stylistId: sel.stylist.id,
+          date: format(sel.date, 'yyyy-MM-dd'),
+          time: sel.time,
+          notes: sel.notes,
+          couponId: (!appliedCoupon?.isManual && appliedCoupon?.id) ? appliedCoupon.id : null,
+          couponCode: appliedCoupon?.isManual ? appliedCoupon.coupons.code : null,
+          guest: user ? null : guestInfo,
+        },
+      })
+      if (error || !data?.ok) {
+        const body = data ?? await error?.context?.json?.().catch(() => null)
+        throw new Error(body?.error || 'Could not book appointment')
       }
-      if (user) row.user_id = user.id
-      else { row.guest_name = guestInfo.name; row.guest_phone = guestInfo.phone; row.guest_email = guestInfo.email }
-      const { error } = await supabase.from('appointments').insert(row)
-      if (error?.code === '23505') throw new Error('That time slot was just taken — please pick another time')
-      if (error) throw error
-      if (appliedCoupon && !appliedCoupon.isManual) {
-        await supabase.functions.invoke('create-payment-intent', {
-          body: { type: 'mark-coupon-used', couponId: appliedCoupon.id },
-        })
-      }
-      await Promise.all([
-        sendConfirmationEmail(row.id),
-        logBooking('pay_in_store'),
-      ])
+      await sendConfirmationEmail(data.appointmentId)
       if (user) sessionStorage.removeItem(`hg_booking_coupon_${user.id}`)
       setPayInStore(true)
       setDone(true)
@@ -855,8 +857,8 @@ export default function Appointments() {
                       </div>
                       <div style={{ display:'grid', gridTemplateColumns:'1fr 1px 1fr', gap:'0 14px' }}>
                         {[
-                          ['Morning',   SLOTS.filter(s => parseInt(s) < 13)],
-                          ['Afternoon', SLOTS.filter(s => parseInt(s) >= 13)],
+                          ['Morning',   slotsForDay(sel.date, sel.service?.duration || 60).filter(s => parseInt(s) < 13)],
+                          ['Afternoon', slotsForDay(sel.date, sel.service?.duration || 60).filter(s => parseInt(s) >= 13)],
                         ].map(([label, slots], col) => (
                           col===0 ? (
                             <div key={label}>
@@ -1082,7 +1084,7 @@ export default function Appointments() {
 
                 <>
                     <div style={{ display:'flex', gap:10 }}>
-                      <button className="btn-gold" onClick={startPayment} disabled={payStep==='loading'||saving||!guestInfoValid} style={{ flex:1, justifyContent:'center', borderRadius:10 }}>
+                      <button className="btn-gold" onClick={startPayment} disabled={!canPayOnline||payStep==='loading'||saving||!guestInfoValid} style={{ flex:1, justifyContent:'center', borderRadius:10, opacity: canPayOnline ? 1 : 0.5 }}>
                         {payStep==='loading'
                           ? <div style={{ width:16,height:16,border:'2px solid rgba(0,0,0,0.25)',borderTopColor:'var(--col-bg)',borderRadius:'50%',animation:'spin 0.8s linear infinite' }}/>
                           : <>Pay Online &nbsp;${finalPrice.toFixed(2)} <ArrowRight size={15}/></>
@@ -1096,6 +1098,11 @@ export default function Appointments() {
                         }
                       </button>
                     </div>
+                    {!canPayOnline && (
+                      <p style={{ fontSize:12, color:'var(--col-text)', opacity:0.6, fontFamily:'DM Sans,sans-serif', marginTop:8, textAlign:'center' }}>
+                        {!user ? 'Sign in to pay online, or pay at the salon.' : 'Your coupon covers this booking — choose Pay in Store to confirm it.'}
+                      </p>
+                    )}
                     <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:6, marginTop:12 }}>
                       <Sparkles size={10} color="rgba(var(--rgb-acc),0.4)"/>
                       <p style={{ fontSize:11, color: 'var(--col-text)', letterSpacing:'0.12em', fontFamily:'DM Sans,sans-serif' }}>Every completed visit counts toward your 30% reward</p>

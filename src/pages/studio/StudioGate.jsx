@@ -330,7 +330,7 @@ export default function StudioGate() {
               onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)' }}
             >
               {loading
-                ? <div style={{ width: 18, height: 18, border: '2px solid rgba(0,0,0,0.2)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                ? <div style={{ width: 18, height: 18, border: '2px solid rgba(0,0,0,0.2)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
                 : <><span>Enter Studio</span><ArrowRight size={15} /></>
               }
             </button>

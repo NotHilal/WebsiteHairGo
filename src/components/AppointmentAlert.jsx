@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
+import { format } from 'date-fns'
 
 const C = {
   gold: 'var(--col-acc)', border: 'rgba(var(--rgb-hi),0.07)',
@@ -10,19 +11,20 @@ const C = {
 }
 
 export default function AppointmentAlert() {
-  const { user, profile, isAdmin } = useAuth()
+  const { user, profile, isAdmin, isManager } = useAuth()
   const [dueAppts,   setDueAppts]   = useState([])
   const [alertOpen,  setAlertOpen]  = useState(false)
   const [updatingId, setUpdatingId] = useState(null)
 
   async function checkDueAppts() {
     const now   = new Date()
-    const today = now.toISOString().split('T')[0]
+    // Local date — toISOString() is UTC, which is still "yesterday" on NZ mornings
+    const today = format(now, 'yyyy-MM-dd')
 
     const { data: linked } = await supabase
-      .from('stylists').select('id').eq('profile_id', user?.id).single()
+      .from('stylists').select('id').eq('profile_id', user?.id).maybeSingle()
 
-    if (!linked && !isAdmin) { setDueAppts([]); return }
+    if (!linked && !isAdmin && !isManager) { setDueAppts([]); return }
 
     let query = supabase
       .from('appointments')
@@ -42,12 +44,12 @@ export default function AppointmentAlert() {
 
   async function markStatus(appt, status) {
     setUpdatingId(appt.id)
-    await supabase.from('appointments').update({ status }).eq('id', appt.id)
-    setDueAppts(prev => prev.filter(a => a.id !== appt.id))
+    const { error } = await supabase.from('appointments').update({ status }).eq('id', appt.id)
+    if (!error) setDueAppts(prev => prev.filter(a => a.id !== appt.id))
     setUpdatingId(null)
   }
 
-  const isStaff = profile?.role === 'admin' || profile?.role === 'artist'
+  const isStaff = profile?.role === 'admin' || profile?.role === 'artist' || profile?.role === 'manager'
 
   useEffect(() => {
     if (!user || !isStaff) return

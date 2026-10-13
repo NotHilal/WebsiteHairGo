@@ -5,6 +5,7 @@ import { getOrFetch, invalidate } from '../../lib/cache'
 import { useLogAction } from '../../hooks/useLogAction'
 import Pager from '../../lib/Pager'
 import toast from 'react-hot-toast'
+import { format } from 'date-fns'
 
 const C = {
   card: 'var(--col-modal)', gold: 'var(--col-acc)', goldDim: 'var(--col-acc)',
@@ -85,11 +86,15 @@ export default function StudioStylists() {
 
   async function load() {
     const [stylistData, staffData] = await getOrFetch('studio_stylists', async () => {
-      const [{ data: stys }, { data: staff }] = await Promise.all([
+      const [{ data: stys }, { data: staff }, { data: rates }] = await Promise.all([
         supabase.from('stylists').select('*').order('display_order'),
-        supabase.from('profiles').select('id, full_name, email').eq('role', 'artist').order('full_name'),
+        // Any staff account can be linked, so a manager who also cuts hair stays bookable
+        supabase.from('profiles').select('id, full_name, email, role').in('role', ['artist', 'manager', 'admin']).order('full_name'),
+        // Rates live in a private table, not on the public stylists row
+        supabase.from('stylist_rates').select('stylist_id, hourly_rate'),
       ])
-      return [stys || [], staff || []]
+      const rateOf = Object.fromEntries((rates || []).map(r => [r.stylist_id, r.hourly_rate]))
+      return [(stys || []).map(s => ({ ...s, hourly_rate: rateOf[s.id] ?? null })), staff || []]
     }, 5 * 60_000)
     setStylists(stylistData)
     setStaff(staffData)
@@ -127,12 +132,17 @@ export default function StudioStylists() {
         if (!url) { setSaving(false); return }
         photo_url = url
       }
-      const { _pendingFile, ...rest } = form
+      const { hourly_rate, ...rest } = form
+      delete rest._pendingFile
       const payload = { ...rest, photo_url, profile_id: rest.profile_id || null }
-      const { error } = modal === 'add'
-        ? await supabase.from('stylists').insert({ ...payload, display_order: stylists.length })
-        : await supabase.from('stylists').update(payload).eq('id', form.id)
+      const { data: saved, error } = modal === 'add'
+        ? await supabase.from('stylists').insert({ ...payload, display_order: stylists.length }).select('id').single()
+        : await supabase.from('stylists').update(payload).eq('id', form.id).select('id').single()
       if (error) throw error
+      const rate = hourly_rate === '' || hourly_rate == null ? null : parseFloat(hourly_rate)
+      const { error: rateErr } = await supabase.from('stylist_rates')
+        .upsert({ stylist_id: saved.id, hourly_rate: Number.isFinite(rate) ? rate : null, updated_at: new Date().toISOString() })
+      if (rateErr) throw rateErr
       toast.success(modal === 'add' ? 'Stylist added' : 'Stylist updated')
       if (modal === 'add') {
         log('stylist.created', { entityType: 'stylist', details: { message: `created stylist "${form.name}"` } })
@@ -158,7 +168,21 @@ export default function StudioStylists() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      await supabase.from('stylists').delete().eq('id', deleteTarget.id)
+      // Upcoming clients would be left without a stylist
+      const { count: upcoming } = await supabase.from('appointments')
+        .select('id', { count: 'exact', head: true })
+        .eq('stylist_id', deleteTarget.id).neq('status', 'cancelled')
+        .gte('date', format(new Date(), 'yyyy-MM-dd'))
+      if (upcoming > 0) {
+        toast.error(`${deleteTarget.name} has ${upcoming} upcoming booking${upcoming !== 1 ? 's' : ''} — move or cancel them first.`)
+        return
+      }
+      const { error } = await supabase.from('stylists').delete().eq('id', deleteTarget.id)
+      if (error?.code === '23503') {
+        toast.error(`${deleteTarget.name} has timesheets or pay history, which must be kept. Unlink their account instead to remove them from bookings.`)
+        return
+      }
+      if (error) throw error
       toast.success('Team member removed')
       invalidate('studio_stylists'); invalidate('studio_home_display'); invalidate('studio_gallery')
       log('stylist.deleted', { entityType: 'stylist', entityId: deleteTarget.id, details: { message: `deleted stylist "${deleteTarget.name}"` } })
@@ -459,7 +483,7 @@ export default function StudioStylists() {
                 <button onClick={save} disabled={saving || uploading}
                   style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: `linear-gradient(135deg,${C.gold},var(--col-acc2))`, color: 'var(--col-bg)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: (saving || uploading) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: (saving || uploading) ? 0.6 : 1 }}>
                   {saving
-                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                     : <><Save size={13} /> {modal === 'add' ? 'Add Stylist' : 'Save Changes'}</>
                   }
                 </button>
@@ -500,7 +524,7 @@ export default function StudioStylists() {
                 <button onClick={confirmDelete} disabled={deleting}
                   style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,#f87171,#ef4444)', color: 'var(--col-text)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: deleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: deleting ? 0.6 : 1, transition: 'all .2s' }}>
                   {deleting
-                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopcolor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(var(--rgb-hi),.3)', borderTopColor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                     : <><Trash2 size={13} /> Delete Permanently</>
                   }
                 </button>

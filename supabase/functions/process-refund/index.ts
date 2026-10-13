@@ -46,7 +46,7 @@ Deno.serve(async (req) => {
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id)) return json({ error: 'Invalid id' }, 400)
 
     if (role === 'artist') {
-      if (type === 'order') return json({ error: 'Forbidden' }, 403)
+      if (type === 'order' || type === 'cancel-with-credit') return json({ error: 'Forbidden' }, 403)
       const { data: appt } = await adminClient.from('appointments')
         .select('stylists(profile_id)').eq('id', id).maybeSingle()
       if ((appt as any)?.stylists?.profile_id !== user.id) return json({ error: 'Forbidden' }, 403)
@@ -63,18 +63,17 @@ Deno.serve(async (req) => {
       if (error || !appt) return json({ error: 'Appointment not found' }, 404)
       if (appt.status === 'cancelled') return json({ error: 'Already cancelled' }, 400)
 
-      // Determine credit amount: use Stripe actual charge if paid online, else service price
-      let creditAmount = 0
-      if (appt.payment_status === 'paid' && appt.payment_intent_id) {
-        const pi = await stripe.paymentIntents.retrieve(appt.payment_intent_id)
-        creditAmount = pi.amount / 100
-      } else if ((appt as any).services?.price) {
-        creditAmount = parseFloat((appt as any).services.price)
+      // Credit is only owed for money actually paid online
+      if (appt.payment_status !== 'paid' || !appt.payment_intent_id) {
+        return json({ error: 'This booking was not paid online — cancel it instead' }, 400)
       }
+      if (!appt.user_id) return json({ error: 'Guest bookings can only be refunded' }, 400)
+      const pi = await stripe.paymentIntents.retrieve(appt.payment_intent_id)
+      const creditAmount = pi.amount / 100
 
       let couponCode: string | null = null
-      if (creditAmount > 0 && appt.user_id) {
-        const code = `CREDIT${Math.random().toString(36).slice(2, 7).toUpperCase()}`
+      if (creditAmount > 0) {
+        const code = `CREDIT${crypto.randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`
         const expiry = new Date()
         expiry.setFullYear(expiry.getFullYear() + 1)
         const { data: coupon } = await adminClient.from('coupons').insert({
@@ -99,7 +98,8 @@ Deno.serve(async (req) => {
         }
       }
 
-      await adminClient.from('appointments').update({ status: 'cancelled' }).eq('id', id)
+      if (!couponCode) return json({ error: 'Could not create the store credit' }, 500)
+      await adminClient.from('appointments').update({ status: 'cancelled', payment_status: 'credited' }).eq('id', id)
       return json({ ok: true, couponCode, creditAmount })
     }
 
@@ -133,7 +133,7 @@ Deno.serve(async (req) => {
       // id here is the payment_intent_id (group key)
       const { data: items, error } = await adminClient
         .from('preorders')
-        .select('id, payment_intent_id, payment_status, status, order_group_id')
+        .select('id, product_id, quantity, payment_intent_id, payment_status, status, order_group_id')
         .or(`payment_intent_id.eq.${id},order_group_id.eq.${id}`)
 
       if (error || !items?.length) return json({ error: 'Order not found' }, 404)
@@ -144,6 +144,16 @@ Deno.serve(async (req) => {
 
       const ids = items.map(i => i.id)
 
+      // Items still waiting for pickup go back on the shelf. Expired holds were
+      // already restocked by the nightly job; picked-up items left the store.
+      async function restockActive() {
+        for (const i of items) {
+          if (i.status === 'active' && i.product_id && i.quantity > 0) {
+            await adminClient.rpc('increment_product_stock', { p_product_id: i.product_id, p_quantity: i.quantity })
+          }
+        }
+      }
+
       // Refund if paid via Stripe (one refund covers the whole payment intent)
       if (first.payment_status === 'paid' && first.payment_intent_id) {
         const pi = await stripe.paymentIntents.retrieve(first.payment_intent_id)
@@ -153,19 +163,21 @@ Deno.serve(async (req) => {
           .from('preorders')
           .update({ status: 'cancelled', payment_status: 'refunded' })
           .in('id', ids)
+        await restockActive()
         return json({ refunded: true })
       }
 
       // Not paid via Stripe — just cancel
       await adminClient.from('preorders').update({ status: 'cancelled' }).in('id', ids)
+      await restockActive()
       return json({ refunded: false })
 
     } else {
-      return json({ error: 'type must be "appointment" or "order"' }, 400)
+      return json({ error: 'type must be "appointment", "cancel-with-credit" or "order"' }, 400)
     }
 
   } catch (err) {
     console.error('process-refund error:', err.message)
-    return json({ error: err.message }, 500)
+    return json({ error: 'Could not process the cancellation — please try again' }, 500)
   }
 })

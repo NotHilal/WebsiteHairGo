@@ -2,8 +2,12 @@
 import Stripe from 'https://esm.sh/stripe@12.18.0?target=deno&no-check=true'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { CURRENCY, packItems, fulfilPaymentIntent } from '../_shared/fulfil.ts'
+import { applyDiscount, couponNote, resolveCodeCoupon, resolveUserCoupon, validateSlot } from '../_shared/booking.ts'
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!)
+
+// Stripe's minimum charge for NZD
+const MIN_CHARGE_CENTS = 50
 
 const CORS = {
   'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? '*',
@@ -14,33 +18,6 @@ function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     headers: { ...CORS, 'Content-Type': 'application/json' }, status,
   })
-}
-
-const isUuid = (s) => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
-
-function applyDiscount(price: number, c) {
-  return c.discount_type === 'percentage'
-    ? Math.max(0, price * (1 - c.discount_value / 100))
-    : Math.max(0, price - parseFloat(c.discount_value))
-}
-
-function couponUsable(c) {
-  if (!c?.active) return false
-  if (c.expiry_date && new Date(c.expiry_date) < new Date()) return false
-  if (c.max_uses != null && (c.current_uses ?? 0) >= c.max_uses) return false
-  return true
-}
-
-// A code typed in by the customer: a public promo, or a personal coupon they own
-async function resolveCodeCoupon(admin, userId: string, code: string) {
-  const { data: c } = await admin.from('coupons').select('*')
-    .eq('code', String(code).trim().toUpperCase()).eq('active', true).maybeSingle()
-  if (!c || !couponUsable(c)) return null
-  const { data: uc } = await admin.from('user_coupons').select('id, used')
-    .eq('user_id', userId).eq('coupon_id', c.id).maybeSingle()
-  if (uc?.used) return null
-  if (!uc && !c.is_public) return null
-  return { coupon: c, userCouponId: uc?.id ?? null }
 }
 
 async function loadCart(admin, userId: string) {
@@ -71,7 +48,7 @@ Deno.serve(async (req) => {
   )
 
   const { data: { user } } = await userClient.auth.getUser()
-  if (!user) return json({ error: 'Unauthorized' }, 401)
+  if (!user) return json({ error: 'Please sign in to pay online' }, 401)
 
   const adminClient = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -97,6 +74,16 @@ Deno.serve(async (req) => {
       const { items, error } = await loadCart(adminClient, user.id)
       if (error) return json({ error }, 400)
 
+      let applied = null
+      if (couponCode) {
+        applied = await resolveCodeCoupon(adminClient, user.id, couponCode)
+        if (!applied || applied.coupon.discount_type !== 'fixed') {
+          return json({ error: 'That coupon can no longer be used' }, 400)
+        }
+      }
+      const subtotal = items.reduce((s, i) => s + parseFloat(i.products.price) * i.quantity, 0)
+      const discount = applied ? Math.min(subtotal, parseFloat(applied.coupon.discount_value)) : 0
+
       const orderGroupId = crypto.randomUUID()
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
 
@@ -108,35 +95,29 @@ Deno.serve(async (req) => {
         })
         if (stockErr) {
           for (const t of taken) {
-            const { data: p } = await adminClient.from('products').select('stock').eq('id', t.product_id).single()
-            await adminClient.from('products').update({ stock: (p?.stock ?? 0) + t.quantity }).eq('id', t.product_id)
+            await adminClient.rpc('increment_product_stock', { p_product_id: t.product_id, p_quantity: t.quantity })
           }
           return json({ error: `Not enough stock for ${i.products.name}` }, 400)
         }
         taken.push(i)
       }
 
-      const { error: insErr } = await adminClient.from('preorders').insert(items.map(i => ({
+      // The order discount is stored once, on the first item
+      const { error: insErr } = await adminClient.from('preorders').insert(items.map((i, n) => ({
         user_id: user.id, product_id: i.product_id, quantity: i.quantity,
+        unit_price: parseFloat(i.products.price),
         status: 'active', payment_status: 'pay_in_store', expires_at: expiresAt,
         order_group_id: orderGroupId,
+        ...(applied && n === 0 ? { coupon_code: applied.coupon.code, discount_amount: discount } : {}),
       })))
       if (insErr) throw insErr
 
+      if (applied) {
+        await adminClient.rpc('consume_coupon', { p_coupon_id: applied.coupon.id, p_user_coupon_id: applied.userCouponId })
+      }
+
       await adminClient.from('cart_items').delete().eq('user_id', user.id)
       return json({ ok: true, orderGroupId })
-    }
-
-    // ── Mark coupon used (pay-in-store booking) ──────────────────────────────
-    // No Stripe payment involved — staff apply the discount in the salon.
-    if (type === 'mark-coupon-used') {
-      if (!couponId) return json({ error: 'couponId required' }, 400)
-      const { data: uc } = await adminClient.from('user_coupons')
-        .select('coupon_id, used').eq('id', couponId).eq('user_id', user.id).single()
-      if (uc && !uc.used) {
-        await adminClient.rpc('consume_coupon', { p_coupon_id: uc.coupon_id, p_user_coupon_id: couponId })
-      }
-      return json({ ok: true })
     }
 
     // ── Create payment intent ────────────────────────────────────────────────
@@ -145,52 +126,20 @@ Deno.serve(async (req) => {
     let metadata: Record<string, string> = { user_id: user.id }
 
     if (type === 'appointment') {
-      if (!isUuid(serviceId) || !isUuid(stylistId)) return json({ error: 'serviceId and stylistId are required' }, 400)
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '') || !/^\d{2}:\d{2}$/.test(time ?? '')) {
-        return json({ error: 'date (YYYY-MM-DD) and time (HH:MM) are required' }, 400)
-      }
-      const todayNZ = new Date().toLocaleDateString('en-CA', { timeZone: 'Pacific/Auckland' })
-      if (date < todayNZ) return json({ error: 'That date is in the past' }, 400)
-
-      const { data: service } = await adminClient.from('services')
-        .select('price, name').eq('id', serviceId).eq('active', true).maybeSingle()
-      if (!service) return json({ error: 'Service not found' }, 404)
-
-      const { data: stylist } = await adminClient.from('stylists')
-        .select('id').eq('id', stylistId).maybeSingle()
-      if (!stylist) return json({ error: 'Stylist not found' }, 404)
-
-      const { data: clash } = await adminClient.from('appointments').select('id')
-        .eq('stylist_id', stylistId).eq('date', date).eq('time', time)
-        .neq('status', 'cancelled').limit(1)
-      if (clash?.length) return json({ error: 'That time slot is no longer available' }, 409)
+      const slot = await validateSlot(adminClient, { serviceId, stylistId, date, time })
+      if (slot.error) return json({ error: slot.error }, slot.status)
+      const { service } = slot
 
       const basePrice = parseFloat(service.price)
-      let price = basePrice
-      let applied = null  // { coupon, userCouponId }
+      const applied = couponId
+        ? await resolveUserCoupon(adminClient, user.id, couponId)
+        : couponCode ? await resolveCodeCoupon(adminClient, user.id, couponCode) : null
+      if ((couponId || couponCode) && !applied) return json({ error: 'That coupon can no longer be used' }, 400)
 
-      if (couponId) {
-        const { data: uc } = await adminClient.from('user_coupons')
-          .select('id, used, coupons(*)').eq('id', couponId).eq('user_id', user.id).maybeSingle()
-        const c = uc?.coupons
-        if (uc && !uc.used && couponUsable(c)) {
-          let canApply = true
-          if (c.min_points_required > 0) {
-            const { data: prof } = await adminClient.from('profiles').select('points').eq('id', user.id).single()
-            if ((prof?.points ?? 0) < c.min_points_required) canApply = false
-          }
-          if (canApply) applied = { coupon: c, userCouponId: uc.id }
-        }
-      } else if (couponCode) {
-        applied = await resolveCodeCoupon(adminClient, user.id, couponCode)
-      }
-
-      let couponNote = ''
+      const price = applied ? applyDiscount(basePrice, applied.coupon) : basePrice
       if (applied) {
-        const c = applied.coupon
-        price = applyDiscount(basePrice, c)
-        couponNote = `[Coupon: ${c.code} — ${c.discount_type === 'percentage' ? `${c.discount_value}% off` : `$${c.discount_value} off`} · Final: $${price.toFixed(2)}]`
-        metadata.coupon_id = c.id
+        metadata.coupon_id = applied.coupon.id
+        metadata.discount_amount = (basePrice - price).toFixed(2)
         if (applied.userCouponId) metadata.user_coupon_id = applied.userCouponId
       }
 
@@ -201,10 +150,14 @@ Deno.serve(async (req) => {
         stylist_id: stylistId,
         date,
         time,
-        notes: [String(notes ?? '').slice(0, 380), couponNote].filter(Boolean).join('\n'),
+        notes: [String(notes ?? '').slice(0, 380), applied ? couponNote(applied.coupon, price) : ''].filter(Boolean).join('\n'),
       }
       amountCents = Math.round(price * 100)
       description = String(label ?? `Appointment: ${service.name}`).slice(0, 300)
+
+      if (amountCents < MIN_CHARGE_CENTS) {
+        return json({ error: 'Your coupon covers this booking — choose "Pay in store" to confirm it.' }, 400)
+      }
 
     } else if (type === 'cart') {
       const { items, error } = await loadCart(adminClient, user.id)
@@ -214,24 +167,29 @@ Deno.serve(async (req) => {
 
       if (couponCode) {
         const applied = await resolveCodeCoupon(adminClient, user.id, couponCode)
-        if (applied && applied.coupon.discount_type === 'fixed') {
-          total = Math.max(0, total - parseFloat(applied.coupon.discount_value))
-          metadata.coupon_id = applied.coupon.id
-          metadata.coupon_code = applied.coupon.code
-          metadata.discount_amount = String(applied.coupon.discount_value)
-          if (applied.userCouponId) metadata.user_coupon_id = applied.userCouponId
+        if (!applied || applied.coupon.discount_type !== 'fixed') {
+          return json({ error: 'That coupon can no longer be used' }, 400)
         }
+        const discount = Math.min(total, parseFloat(applied.coupon.discount_value))
+        total -= discount
+        metadata.coupon_id = applied.coupon.id
+        metadata.coupon_code = applied.coupon.code
+        metadata.discount_amount = discount.toFixed(2)
+        if (applied.userCouponId) metadata.user_coupon_id = applied.userCouponId
       }
 
       metadata = { ...metadata, kind: 'cart', ...packItems(items) }
       amountCents = Math.round(total * 100)
       description = String(label ?? `HairGo Store — ${items.length} item${items.length !== 1 ? 's' : ''}`).slice(0, 300)
 
+      if (amountCents < MIN_CHARGE_CENTS) {
+        return json({ error: 'Your coupon covers this order — choose "Pay in store" to reserve it.' }, 400)
+      }
+
     } else {
-      return json({ error: 'type must be "appointment", "cart", "finalize", "reserve-cart" or "mark-coupon-used"' }, 400)
+      return json({ error: 'type must be "appointment", "cart", "finalize" or "reserve-cart"' }, 400)
     }
 
-    if (amountCents <= 0) return json({ error: 'Amount must be positive' }, 400)
     if (!Deno.env.get('STRIPE_SECRET_KEY')) return json({ error: 'Stripe not configured' }, 500)
 
     const paymentIntent = await stripe.paymentIntents.create({

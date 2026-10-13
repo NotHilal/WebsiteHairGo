@@ -21,7 +21,7 @@ const C = {
 }
 
 export default function DayOffAlert() {
-  const { user, profile, isAdmin } = useAuth()
+  const { user, profile } = useAuth()
   const [notes, setNotes]   = useState([])
   const [open,  setOpen]    = useState(false)
 

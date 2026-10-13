@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   Search, X, ChevronDown, Trash2, AlertTriangle, ChevronRight, ChevronLeft,
   Calendar, Clock, LayoutList,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { apptFinalPrice } from '../../lib/price'
+import { fetchAll } from '../../lib/fetchAll'
 import { useAuth } from '../../contexts/AuthContext'
 import { useLogAction } from '../../hooks/useLogAction'
 import {
@@ -120,7 +121,6 @@ function StatusDropdown({ appt, onUpdate }) {
 export default function StudioAppointmentsList() {
   const { user, isAdmin, isManager } = useAuth()
   const log = useLogAction()
-  const navigate = useNavigate()
 
   // List state
   const [appointments, setAppointments] = useState([])
@@ -163,23 +163,20 @@ export default function StudioAppointmentsList() {
 
   async function load() {
     if (!user) return
+    const base = () => supabase
+      .from('appointments')
+      .select('*, profiles(full_name, phone), services(name, price, duration), stylists(name)')
+      .order('date', { ascending: false })
+      .order('time', { ascending: true })
+      .order('id')
     if (isAdmin || isManager) {
-      const { data } = await supabase
-        .from('appointments')
-        .select('*, profiles(full_name, phone), services(name, price, duration), stylists(name)')
-        .order('date', { ascending: false })
-        .order('time', { ascending: true })
-      setAppointments(data || [])
+      const { data } = await fetchAll(base)
+      setAppointments(data)
     } else {
       const { data: linked } = await supabase.from('stylists').select('id').eq('profile_id', user.id).maybeSingle()
       if (linked) {
-        const { data } = await supabase
-          .from('appointments')
-          .select('*, profiles(full_name, phone), services(name, price, duration), stylists(name)')
-          .eq('stylist_id', linked.id)
-          .order('date', { ascending: false })
-          .order('time', { ascending: true })
-        setAppointments(data || [])
+        const { data } = await fetchAll(() => base().eq('stylist_id', linked.id))
+        setAppointments(data)
       }
     }
     setLoading(false)
@@ -215,25 +212,9 @@ export default function StudioAppointmentsList() {
     setAppointments(prev => prev.map(a => a.id === id ? updated : a))
     if (details?.id === id) setDetails(updated)
 
+    // Loyalty points and the 5th-visit reward are added by the database
     if (newStatus === 'completed' && appt?.status !== 'completed' && appt?.user_id) {
-      const { data: prof } = await supabase.from('profiles').select('points').eq('id', appt.user_id).single()
-      const newCount = (prof?.points || 0) + 1
-      await supabase.from('profiles').update({ points: newCount }).eq('id', appt.user_id)
-      if (newCount % 5 === 0) {
-        const code = `REWARD${Math.random().toString(36).slice(2, 7).toUpperCase()}`
-        const expiry = new Date(); expiry.setMonth(expiry.getMonth() + 3)
-        const { data: coupon } = await supabase.from('coupons').insert({
-          code, discount_type: 'percentage', discount_value: 30,
-          min_points_required: 0, expiry_date: expiry.toISOString().split('T')[0],
-          max_uses: 1, active: true, is_public: false,
-        }).select().single()
-        if (coupon) {
-          await supabase.from('user_coupons').insert({ user_id: appt.user_id, coupon_id: coupon.id, used: false })
-          toast.success(`Visit ${newCount} — 30% reward sent to ${appt.profiles?.full_name || 'client'}`)
-        }
-      } else {
-        toast.success(`Visit ${newCount % 5}/5 — ${5 - (newCount % 5)} more to unlock 30% off`)
-      }
+      toast.success("Marked as completed — visit added to the client's loyalty card")
     } else {
       toast.success(`Marked as ${STATUS_CFG[newStatus]?.label}`)
     }
@@ -307,7 +288,7 @@ export default function StudioAppointmentsList() {
   ]
 
   // Shared appointment row renderer
-  function ApptRow({ appt, i, last }) {
+  function ApptRow({ appt, last }) {
     const { text: dateText, accent } = dateLabel(appt.date)
     const name     = clientName(appt)
     const initials = name?.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase() || '?'
@@ -341,7 +322,7 @@ export default function StudioAppointmentsList() {
           {appt.time && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.7rem', color: isPastAppt && appt.status !== 'completed' ? 'rgba(248,113,113,0.5)' : 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>{appt.time.slice(0, 5)}</span></>}
           {appt.services?.name && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.7rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', maxWidth: 160 }}>{appt.services.name}</span></>}
           {appt.stylists?.name && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.7rem', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif' }}>{appt.stylists.name}</span></>}
-          {appt.services?.price && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.72rem', fontFamily: 'DM Sans,sans-serif', color: appt.status === 'completed' ? C.gold : 'var(--col-text)', fontWeight: appt.status === 'completed' ? 600 : 400 }}>${appt.services.price}</span></>}
+          {appt.services?.price && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: '0.72rem', fontFamily: 'DM Sans,sans-serif', color: appt.status === 'completed' ? C.gold : 'var(--col-text)', fontWeight: appt.status === 'completed' ? 600 : 400 }}>${apptFinalPrice(appt).toFixed(2)}</span></>}
           {appt.payment_status === 'paid' && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.25)', color: '#34d399', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Paid online</span></>}
           {appt.payment_status === 'pay_in_store' && appt.status === 'completed' && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.25)', color: '#34d399', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Paid in store</span></>}
           {appt.payment_status === 'pay_in_store' && appt.status !== 'completed' && <><span style={{ color: 'var(--col-text)' }}>·</span><span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.28)', color: '#f59e0b', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>Pay in store</span></>}
@@ -791,7 +772,7 @@ export default function StudioAppointmentsList() {
                             {details.services?.price && (
                               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                                 <p style={{ fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: C.muted, fontFamily: 'DM Sans,sans-serif', fontWeight: 600, marginBottom: 4 }}>Price</p>
-                                <span className="font-display" style={{ fontSize: '1.3rem', color: details.status === 'completed' ? C.gold : C.dim }}>${details.services.price}</span>
+                                <span className="font-display" style={{ fontSize: '1.3rem', color: details.status === 'completed' ? C.gold : C.dim }}>${apptFinalPrice(details).toFixed(2)}</span>
                               </div>
                             )}
                           </div>
@@ -801,21 +782,21 @@ export default function StudioAppointmentsList() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0.65rem 1rem', background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.22)', borderRadius: 10, marginBottom: '0.875rem' }}>
                           <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#34d399', flexShrink: 0 }} />
                           <span style={{ fontSize: '0.8rem', color: '#34d399', fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>Paid online</span>
-                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#34d399' }}>${details.services.price}</span>}
+                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#34d399' }}>${apptFinalPrice(details).toFixed(2)}</span>}
                         </div>
                       )}
                       {details.payment_status === 'pay_in_store' && details.status === 'completed' && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0.65rem 1rem', background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.22)', borderRadius: 10, marginBottom: '0.875rem' }}>
                           <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#34d399', flexShrink: 0 }} />
                           <span style={{ fontSize: '0.8rem', color: '#34d399', fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>Paid in store</span>
-                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#34d399' }}>${details.services.price}</span>}
+                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#34d399' }}>${apptFinalPrice(details).toFixed(2)}</span>}
                         </div>
                       )}
                       {details.payment_status === 'pay_in_store' && details.status !== 'completed' && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0.65rem 1rem', background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.22)', borderRadius: 10, marginBottom: '0.875rem' }}>
                           <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b', flexShrink: 0 }} />
                           <span style={{ fontSize: '0.8rem', color: '#f59e0b', fontFamily: 'DM Sans,sans-serif', fontWeight: 600 }}>Payment due in store</span>
-                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#f59e0b' }}>${details.services.price}</span>}
+                          {details.services?.price && <span className="font-display" style={{ marginLeft: 'auto', fontSize: '1.1rem', color: '#f59e0b' }}>${apptFinalPrice(details).toFixed(2)}</span>}
                         </div>
                       )}
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', background: `${cfg.bg}`, border: `1px solid ${cfg.border}`, borderRadius: 10, marginBottom: isAdmin ? '0.875rem' : 0 }}>

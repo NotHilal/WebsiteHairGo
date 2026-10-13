@@ -106,7 +106,7 @@ export default function Gallery() {
 
   useEffect(() => {
     getOrFetch('gallery_all', async () => {
-      const { data } = await supabase.from('gallery').select('*, stylists(name)').order('display_order')
+      const { data } = await supabase.from('gallery').select('*, stylists(name)').or('visible.is.null,visible.eq.true').order('display_order')
       return data || []
     }, 5 * 60_000).then(data => { setImages(data); setLoading(false) })
   }, [])
@@ -116,10 +116,13 @@ export default function Gallery() {
     return () => { document.body.style.overflow = '' }
   }, [lightbox])
 
-  const source   = loading ? [] : [...images, ...GALLERY.slice(images.length)]
-  const filtered = source
+  // Demo photos only stand in while the salon has none of its own
+  const source    = loading ? [] : (images.length ? images : GALLERY)
+  // Real photos have no gender, so the Woman/Man filter only applies to tagged photos
+  const hasGender = source.some(img => img.gender)
+  const filtered  = source
     .filter(img => cat === 'All' || img.category === cat.toLowerCase())
-    .filter(img => gender === 'All' || img.gender === gender.toLowerCase())
+    .filter(img => !hasGender || gender === 'All' || img.gender === gender.toLowerCase())
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE))
   const paginated  = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE)
 
@@ -195,7 +198,7 @@ export default function Gallery() {
 
           {/* Gender segmented control */}
           <div style={{ display: 'flex', borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(var(--rgb-hi),0.1)', background: 'rgba(var(--rgb-hi),0.03)' }}>
-            {GENDERS.map(g => (
+            {hasGender && GENDERS.map(g => (
               <button key={g} onClick={() => changeFilter(() => setGender(g))}
                 style={{ padding: '9px 28px', background: gender === g ? 'var(--col-acc)' : 'transparent', color: gender === g ? 'var(--col-bg)' : 'var(--col-text)', border: 'none', cursor: 'pointer', fontSize: 12, letterSpacing: '0.18em', textTransform: 'uppercase', fontFamily: 'DM Sans, sans-serif', fontWeight: gender === g ? 600 : 400, transition: 'all 0.22s ease' }}>
                 {g}

@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useMemo } from 'react'
+﻿import { useState, useEffect } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Plus, Edit2, Trash2, X, Save, Scissors, Clock, Upload, Eye, EyeOff, AlertTriangle } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
@@ -91,7 +91,8 @@ export default function StudioServices() {
         const { data: { publicUrl } } = supabase.storage.from('gallery').getPublicUrl(path)
         image_url = publicUrl
       }
-      const { id: _id, ...rest } = form
+      const rest = { ...form }
+      delete rest.id
       const payload = { ...rest, price: parseFloat(form.price) || 0, duration: parseInt(form.duration) || 0, image_url }
       const { error } = modal === 'add'
         ? await supabase.from('services').insert(payload)
@@ -470,7 +471,7 @@ export default function StudioServices() {
                   <button onClick={save} disabled={saving} className="btn-g"
                     style={{ flex: 1.5, padding: '0.7rem', borderRadius: 10, background: `linear-gradient(135deg,${C.gold},var(--col-acc2))`, color: 'var(--col-bg)', fontSize: '0.82rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: saving ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: saving ? 0.6 : 1, transition: 'all .2s' }}>
                     {saving
-                      ? <div style={{ width: 15, height: 15, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
+                      ? <div style={{ width: 15, height: 15, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
                       : <><Save size={14} /> {modal === 'add' ? 'Add Service' : 'Save Changes'}</>
                     }
                   </button>
@@ -519,7 +520,7 @@ export default function StudioServices() {
                   <button onClick={confirmDelete} disabled={deleting}
                     style={{ flex: 1, padding: '0.65rem', borderRadius: 9, border: 'none', cursor: deleting ? 'not-allowed' : 'pointer', background: 'linear-gradient(135deg,#f87171,#ef4444)', color: 'var(--col-text)', fontSize: '0.82rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, transition: 'all .2s', opacity: deleting ? 0.6 : 1 }}>
                     {deleting
-                      ? <div style={{ width: 14, height: 14, border: '2px solid var(--col-text)', borderTopcolor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
+                      ? <div style={{ width: 14, height: 14, border: '2px solid var(--col-text)', borderTopColor: 'var(--col-text)', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
                       : <><Trash2 size={13} /> Delete</>
                     }
                   </button>

@@ -2,6 +2,7 @@
 import { createPortal } from 'react-dom'
 import { Users, Search, MessageCircle, Mail, X, Send, Star, ChevronDown, ShieldCheck, Check, UserPlus, Scissors, Plus, ArrowRight, Upload } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { fetchAll } from '../../lib/fetchAll'
 import { invalidate } from '../../lib/cache'
 import { useAuth } from '../../contexts/AuthContext'
 import { useLogAction } from '../../hooks/useLogAction'
@@ -137,7 +138,7 @@ export default function StudioUsers() {
 
   async function load() {
     const [{ data, error }, { data: stylistData }] = await Promise.all([
-      supabase.from('profiles').select('*').order('created_at', { ascending: false }),
+      fetchAll(() => supabase.from('profiles').select('*').order('created_at', { ascending: false }).order('id')),
       supabase.from('stylists').select('id, name, title, profile_id').not('profile_id', 'is', null),
     ])
     if (error) toast.error('Could not load users: ' + error.message)
@@ -147,7 +148,7 @@ export default function StudioUsers() {
   }
 
   async function unlinkStylist(userId, userName) {
-    const { error, count } = await supabase.from('stylists').update({ profile_id: null }).eq('profile_id', userId).select()
+    const { error } = await supabase.from('stylists').update({ profile_id: null }).eq('profile_id', userId).select()
     if (error) return toast.error(error.message)
     toast.success(`Stylist unlinked from ${userName || 'account'}`)
   }
@@ -239,9 +240,10 @@ export default function StudioUsers() {
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error || 'Failed to update role')
-      // If demoting from employee, unlink or delete the attached stylist
+      // Only a move back to a client account unlinks the stylist profile; an
+      // artist promoted to manager/admin keeps their bookings and stays bookable
       const wasEmployee = all.find(u => u.id === roleConfirm.userId)?.role === 'artist'
-      if (wasEmployee) {
+      if (wasEmployee && roleConfirm.newRole === 'user') {
         if (deleteStylist && roleConfirm.linkedStylist) {
           await supabase.from('stylists').delete().eq('id', roleConfirm.linkedStylist.id)
         } else {
@@ -622,7 +624,7 @@ export default function StudioUsers() {
               </div>
 
               {/* Linked stylist — only shown when demoting an artist */}
-              {roleConfirm.linkedStylist && (
+              {roleConfirm.linkedStylist && roleConfirm.newRole === 'user' && (
                 <div style={{ marginBottom: '1.25rem' }}>
                   <p style={{ fontSize: 9, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--col-text)', fontFamily: 'DM Sans,sans-serif', fontWeight: 600, marginBottom: 8 }}>
                     Linked artist profile
@@ -667,7 +669,7 @@ export default function StudioUsers() {
                 <button onClick={applyRoleChange} disabled={confirming}
                   style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,var(--col-acc),var(--col-acc2))', color: 'var(--col-bg)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: confirming ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: confirming ? 0.6 : 1, transition: 'all .2s' }}>
                   {confirming
-                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
+                    ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
                     : <><ShieldCheck size={14} /> Confirm Change</>
                   }
                 </button>
@@ -737,7 +739,7 @@ export default function StudioUsers() {
                   <button onClick={sendMessage} disabled={sending}
                     style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,var(--col-acc),var(--col-acc2))', color: 'var(--col-bg)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: sending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: sending ? 0.6 : 1, transition: 'all .2s' }}>
                     {sending
-                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
+                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
                       : <><Send size={13} /> Send & Open Ticket</>
                     }
                   </button>
@@ -924,7 +926,7 @@ export default function StudioUsers() {
                   <button onClick={applyEmployeePromotion} disabled={empSaving}
                     style={{ flex: 2, padding: '0.65rem', borderRadius: 10, background: 'linear-gradient(135deg,#60a5fa,#3b82f6)', color: 'var(--col-bg)', fontSize: '0.8rem', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, border: 'none', cursor: empSaving ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, opacity: empSaving ? 0.6 : 1 }}>
                     {empSaving
-                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopcolor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
+                      ? <div style={{ width: 14, height: 14, border: '2px solid rgba(0,0,0,.25)', borderTopColor: 'var(--col-bg)', borderRadius: '50%', animation: 'spin .8s linear infinite' }} />
                       : <><ShieldCheck size={14} /> Confirm & Promote</>
                     }
                   </button>

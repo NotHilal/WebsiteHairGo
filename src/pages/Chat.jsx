@@ -36,6 +36,7 @@ export default function Chat() {
   const [newMsg,   setNewMsg]   = useState('')
   const [creating,    setCreating]    = useState(false)
   const [workers,     setWorkers]     = useState([])
+  const [staffNames,  setStaffNames]  = useState({})
   const [recipientId, setRecipientId] = useState(null)
   const bottomRef  = useRef(null)
   const selectedRef = useRef(null)
@@ -45,8 +46,12 @@ export default function Chat() {
   useEffect(() => {
     if (!user) return
     loadTickets()
-    supabase.from('profiles').select('id, full_name').eq('role', 'artist').order('full_name')
-      .then(({ data }) => setWorkers(data || []))
+    // Customers can't read staff profiles directly; this returns names only
+    supabase.rpc('staff_directory').then(({ data }) => {
+      const staff = data || []
+      setStaffNames(Object.fromEntries(staff.map(p => [p.id, p.full_name])))
+      setWorkers(staff.filter(p => p.role === 'artist').sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')))
+    })
     const sub = supabase.channel(`client-tickets-${user.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ticket_messages' }, payload => {
         const msg = payload.new
@@ -244,7 +249,7 @@ export default function Chat() {
             ) : tickets.map(tk => {
               const isActive = selected?.id === tk.id
               const isOpen = tk.status === 'open'
-              const avatarLabel = (tk.recipient?.full_name || 'H')[0].toUpperCase()
+              const avatarLabel = (staffNames[tk.recipient_id] || 'H')[0].toUpperCase()
               return (
                 <button key={tk.id} className="tk-item" onClick={() => setSelected(tk)}
                   style={{ width: '100%', textAlign: 'left', padding: '0.875rem 1rem', display: 'flex', alignItems: 'center', gap: 12, background: isActive ? 'rgba(var(--rgb-acc),0.07)' : 'transparent', border: 'none', borderLeft: `3px solid ${isActive ? 'var(--col-acc)' : 'transparent'}`, borderBottom: '1px solid rgba(var(--rgb-hi),0.04)', cursor: 'pointer', transition: 'background .15s' }}>
@@ -281,7 +286,7 @@ export default function Chat() {
                       </div>
                       <span style={{ color: 'rgba(var(--rgb-hi),0.15)', fontSize: 10 }}>·</span>
                       <span style={{ fontSize: 10, fontFamily: 'DM Sans,sans-serif', color: 'rgba(var(--rgb-hi),0.35)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-                        {tk.recipient?.full_name || 'HairGo Store'}
+                        {staffNames[tk.recipient_id] || 'HairGo Store'}
                       </span>
                       {tk.appointment_id && (
                         <>
@@ -338,7 +343,7 @@ export default function Chat() {
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 20, background: selected.recipient ? 'rgba(52,211,153,0.1)' : 'var(--col-acc)', border: `1px solid ${selected.recipient ? 'rgba(52,211,153,0.3)' : 'rgba(var(--rgb-acc),0.6)'}` }}>
                     <div style={{ width: 5, height: 5, borderRadius: '50%', background: selected.recipient ? '#34d399' : 'var(--col-bg)', flexShrink: 0 }} />
                     <span style={{ fontSize: 12, fontFamily: 'DM Sans,sans-serif', fontWeight: 700, color: selected.recipient ? '#34d399' : 'var(--col-bg)', letterSpacing: '0.04em' }}>
-                      {selected.recipient?.full_name || 'HairGo Store'}
+                      {staffNames[selected.recipient_id] || 'HairGo Store'}
                     </span>
                   </span>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 20, background: selected.status === 'open' ? 'rgba(52,211,153,0.08)' : 'rgba(var(--rgb-hi),0.04)', border: `1px solid ${selected.status === 'open' ? 'rgba(52,211,153,0.2)' : 'rgba(var(--rgb-hi),0.07)'}` }}>
@@ -389,7 +394,7 @@ export default function Chat() {
                         )}
                         <div className="msg-bubble-wrap" style={{ display: 'flex', flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start', gap: 4, maxWidth: '68%' }}>
                           {!isMe && !prevSame && (
-                            <span style={{ fontSize: 11, color: 'var(--col-acc)', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', paddingLeft: 3 }}>{msg.sender?.full_name || 'HairGo Team'}</span>
+                            <span style={{ fontSize: 11, color: 'var(--col-acc)', fontFamily: 'DM Sans,sans-serif', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', paddingLeft: 3 }}>{staffNames[msg.sender_id] || 'HairGo Team'}</span>
                           )}
                           <div className="msg-content" style={{ padding: '0.6rem 1rem', borderRadius: isMe ? '16px 16px 4px 16px' : '16px 16px 16px 4px', fontSize: '0.84rem', lineHeight: 1.65, fontFamily: 'DM Sans,sans-serif', ...(isMe ? { background: `linear-gradient(135deg,${C.gold},var(--col-acc2))`, color: 'var(--col-bg)', fontWeight: 500, boxShadow: '0 4px 16px rgba(var(--rgb-acc),0.22)' } : { background: 'rgba(var(--rgb-hi),0.06)', border: '1px solid rgba(var(--rgb-hi),0.08)', color: 'var(--col-text)', backdropFilter: 'blur(6px)' }) }}>
                             {msg.content}
